@@ -12,7 +12,7 @@ import time
 DB_PATH = os.getenv("DB_PATH", "podcastindex.db")
 SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL") # Required: Set this in your environment
 DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME") # Required
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
 # --- Constants ---
 SQS_BATCH_SIZE = 10 # AWS SQS limit is 10 messages per batch
@@ -71,11 +71,18 @@ def main():
     # Get total count for progress logging
     cursor.execute("SELECT COUNT(*) FROM podcasts")
     total_feeds = cursor.fetchone()[0]
-    logging.info(f"Found {total_feeds} podcast feeds to process.")
+    logging.info(f"Found {total_feeds:,} podcast feeds to process.")
+
+    # Get total episodes from DB for stats
+    cursor.execute("SELECT SUM(episodeCount) FROM podcasts")
+    # Handle case where table is empty or column has NULLs
+    total_episodes_in_db = cursor.fetchone()[0] or 0
+    logging.info(f"DB reports a total of {total_episodes_in_db:,} episodes across all feeds.")
 
     # Initialize counters and the SQS message batch list
     feeds_processed = 0
     episodes_enqueued = 0
+    total_episodes_found_in_feeds = 0
     sqs_batch = []
     
     cursor.execute("SELECT id, url FROM podcasts")
@@ -94,6 +101,8 @@ def main():
             if not feed.entries:
                 logging.warning(f"No entries found in feed: {rss_url}")
                 continue
+
+            total_episodes_found_in_feeds += len(feed.entries)
 
             for entry in feed.entries:
                 for enclosure in getattr(entry, 'enclosures', []):
@@ -116,7 +125,7 @@ def main():
                             sent_count = send_batch_to_sqs(sqs_batch)
                             episodes_enqueued += sent_count
                             sqs_batch.clear() # Clear the batch
-                        break # Move to the next episode
+                        break # Found an enclosure, process next episode entry
                         
         except Exception as e:
             logging.error(f"Failed to process feed {rss_url}: {e}")
@@ -128,8 +137,10 @@ def main():
 
     db_conn.close()
     logging.info("--- Producer Script Finished ---")
-    logging.info(f"Total feeds processed: {feeds_processed}")
-    logging.info(f"Total episode jobs enqueued: {episodes_enqueued}")
+    logging.info(f"Total feeds processed: {feeds_processed:,}")
+    logging.info(f"Total episodes (from DB): {total_episodes_in_db:,}")
+    logging.info(f"Total episodes (found in feeds): {total_episodes_found_in_feeds:,}")
+    logging.info(f"Total episode jobs enqueued: {episodes_enqueued:,}")
 
 
 if __name__ == "__main__":
