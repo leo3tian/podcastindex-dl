@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import time
+import requests
 
 # --- Configuration ---
 # You can change these values or set them as environment variables
@@ -18,6 +19,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 # --- Constants ---
 SQS_BATCH_SIZE = 10  # For sending to the download queue
 MAX_DYNAMODB_BATCH_GET = 100 # DynamoDB limit
+REQUEST_TIMEOUT = 20 # Timeout for RSS feed requests (seconds)
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -89,6 +91,7 @@ def process_feed_job(message):
         body = json.loads(message['Body'])
         podcast_id = body['podcast_id']
         rss_url = body['rss_url']
+        language = body.get('language', 'unknown') # Safely get language
     except (KeyError, json.JSONDecodeError) as e:
         logging.error(f"Invalid message format, deleting from queue: {message['Body']} - {e}")
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
@@ -97,7 +100,17 @@ def process_feed_job(message):
     logging.info(f"Processing feed for podcast_id {podcast_id}: {rss_url}")
 
     try:
-        feed = feedparser.parse(rss_url)
+        # Use requests with timeout, then pass to feedparser
+        try:
+            response = requests.get(rss_url, timeout=REQUEST_TIMEOUT, headers={
+                'User-Agent': 'PodcastIndex-Downloader/1.0'
+            })
+            response.raise_for_status()
+            feed = feedparser.parse(response.content)
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Failed to fetch feed {rss_url}: {e}")
+            sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+            return
 
         if feed.bozo:
             logging.warning(f"Bozo feed (might be malformed): {rss_url} - {feed.bozo_exception}")
@@ -136,7 +149,8 @@ def process_feed_job(message):
                 "Id": str(time.time_ns()),
                 "MessageBody": json.dumps({
                     "episode_url": episode_url,
-                    "podcast_rss_url": rss_url
+                    "podcast_rss_url": rss_url,
+                    "language": language
                 })
             }
             sqs_batch.append(message)

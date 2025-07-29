@@ -35,9 +35,7 @@ def send_batch_to_sqs(sqs_batch):
         response = sqs_client.send_message_batch(
             QueueUrl=FEEDS_SQS_QUEUE_URL, Entries=sqs_batch
         )
-        # Log successful and failed messages
-        if "Successful" in response:
-            logging.info(f"Successfully sent {len(response['Successful'])} feed jobs.")
+        # Log only failed messages for cleaner output
         if "Failed" in response and response["Failed"]:
             logging.error(f"Failed to send {len(response['Failed'])} feed jobs.")
             for failed_msg in response["Failed"]:
@@ -74,25 +72,32 @@ def main():
     # Initialize counters and the SQS message batch list
     feeds_enqueued = 0
     sqs_batch = []
-    
-    cursor.execute("SELECT id, url FROM podcasts")
-    for podcast_id, rss_url in cursor:
+    log_interval = 100000  # Log progress every 100,000 feeds
+    last_log_count = 0
+
+    cursor.execute("SELECT id, url, language FROM podcasts")
+    for podcast_id, rss_url, language in cursor:
         # Create a message for the SQS batch
         message = {
             "Id": str(podcast_id), # Use podcast ID as the unique message ID in the batch
             "MessageBody": json.dumps({
                 "podcast_id": podcast_id,
-                "rss_url": rss_url
+                "rss_url": rss_url,
+                "language": language or "unknown" # Ensure language is never null
             })
         }
         sqs_batch.append(message)
-        
+
         # When the batch is full, send it
         if len(sqs_batch) == SQS_BATCH_SIZE:
             sent_count = send_batch_to_sqs(sqs_batch)
             feeds_enqueued += sent_count
-            sqs_batch.clear() # Clear the batch
-            logging.info(f"Progress: {feeds_enqueued:,} / {total_feeds:,} feeds enqueued.")
+            sqs_batch.clear()  # Clear the batch
+
+            # Log progress at intervals
+            if feeds_enqueued - last_log_count >= log_interval:
+                logging.info(f"Progress: {feeds_enqueued:,} / {total_feeds:,} feeds enqueued.")
+                last_log_count = feeds_enqueued
 
     # Send any remaining messages in the final batch
     if sqs_batch:
