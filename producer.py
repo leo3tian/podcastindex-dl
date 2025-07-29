@@ -10,8 +10,8 @@ import time
 # --- Configuration ---
 # You can change these values or set them as environment variables
 DB_PATH = os.getenv("DB_PATH", "podcastindex.db")
-SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL") # Required: Set this in your environment
-DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME") # Required
+SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/PodcastIndexQueue") # Required: Set this in your environment
+DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "PodcastIndexJobs") # Required
 AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
 # --- Constants ---
