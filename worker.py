@@ -20,15 +20,18 @@ AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 # --- Constants ---
 SQS_BATCH_SIZE = 10  # For sending to the download queue
 MAX_DYNAMODB_BATCH_GET = 100 # DynamoDB limit
-REQUEST_TIMEOUT = 30  # Timeout for RSS feed requests in seconds
-
-# --- Regex for private IPs ---
 # This will match common private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
 PRIVATE_IP_REGEX = re.compile(
     r"^(?:10|127)\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}$|"
     r"^(?:172\.(?:1[6-9]|2[0-9]|3[0-1]))\.(?:[0-9]{1,3}\.){1}[0-9]{1,3}$|"
     r"^(?:192\.168)\.(?:[0-9]{1,3}\.){1}[0-9]{1,3}$"
 )
+
+# --- Timeouts ---
+# Use a tuple for (connect_timeout, read_timeout)
+# Connect: How long to wait for a connection to be established.
+# Read: How long to wait for the server to send data once connected.
+REQUEST_TIMEOUT = (3, 18)  # 5-second connect timeout, 25-second read timeout
 
 # --- Setup Logging ---
 logging.basicConfig(
