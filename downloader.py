@@ -120,7 +120,7 @@ def main():
     logging.info(f"Polling SQS Queue: {DOWNLOAD_SQS_QUEUE_URL}")
     
     downloads_completed = 0
-    log_interval = 100
+    log_interval = 10
 
     while True:
         try:
