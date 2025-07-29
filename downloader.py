@@ -57,7 +57,10 @@ def process_download_job(message):
 
     # 1. Download the audio file
     try:
-        response = requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+        }
+        response = requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers)
         response.raise_for_status()
         audio_content = response.content
     except requests.exceptions.RequestException as e:
@@ -100,6 +103,7 @@ def process_download_job(message):
     # 4. If all successful, delete the message from SQS
     try:
         sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+        logging.info(f"Successfully completed download for {episode_url}.")
     except Exception as e:
         logging.error(f"Failed to delete SQS message for {episode_url}: {e}")
         # This is not ideal, as the job might be re-processed, but the DynamoDB check will prevent re-download.
