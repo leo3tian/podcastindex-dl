@@ -19,7 +19,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 # --- Constants ---
 SQS_BATCH_SIZE = 10  # For sending to the download queue
 MAX_DYNAMODB_BATCH_GET = 100 # DynamoDB limit
-REQUEST_TIMEOUT = 20 # Timeout for RSS feed requests (seconds)
+REQUEST_TIMEOUT = 5 # Timeout for RSS feed requests (seconds)
 
 # --- Setup Logging ---
 logging.basicConfig(
