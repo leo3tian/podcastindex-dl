@@ -7,6 +7,11 @@ import sys
 import time
 import requests
 import re
+import urllib3
+
+# Suppress only the InsecureRequestWarning from urllib3, as we are intentionally
+# disabling SSL verification for some feeds.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Configuration ---
 # You can change these values or set them as environment variables
@@ -141,17 +146,25 @@ def process_feed_job(message):
             feed.bozo = 0
             logging.warning(f"Bozo feed (might be malformed): {rss_url} - {feed.bozo_exception}")
 
-        if not feed.entries:
-            logging.warning(f"No entries found in feed: {rss_url}")
-            sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-            return
-
         all_episode_urls = []
+        audio_extensions = {'.mp3', '.m4a', '.ogg', '.wav', '.aac', '.flac', '.opus'}
+
         for entry in feed.entries:
             for enclosure in getattr(entry, 'enclosures', []):
-                if 'audio' in enclosure.get('type', '') and enclosure.get('href'):
-                    all_episode_urls.append(enclosure.href)
-                    break # Assume one audio enclosure per entry
+                href = enclosure.get('href')
+                if not href:
+                    continue
+
+                # Check 1: Standard audio MIME type
+                is_audio_mime = 'audio' in enclosure.get('type', '')
+
+                # Check 2: File extension, if MIME type is missing or generic
+                href_lower = href.lower()
+                has_audio_extension = any(href_lower.endswith(ext) for ext in audio_extensions)
+
+                if is_audio_mime or has_audio_extension:
+                    all_episode_urls.append(href)
+                    break  # Assume one audio enclosure per entry
 
         if not all_episode_urls:
             logging.warning(f"No audio enclosures found in feed: {rss_url}")
