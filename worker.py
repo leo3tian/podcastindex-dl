@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import requests
+import re
 
 # --- Configuration ---
 # You can change these values or set them as environment variables
@@ -19,7 +20,15 @@ AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 # --- Constants ---
 SQS_BATCH_SIZE = 10  # For sending to the download queue
 MAX_DYNAMODB_BATCH_GET = 100 # DynamoDB limit
-REQUEST_TIMEOUT = 5 # Timeout for RSS feed requests (seconds)
+REQUEST_TIMEOUT = 30  # Timeout for RSS feed requests in seconds
+
+# --- Regex for private IPs ---
+# This will match common private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+PRIVATE_IP_REGEX = re.compile(
+    r"^(?:10|127)\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}$|"
+    r"^(?:172\.(?:1[6-9]|2[0-9]|3[0-1]))\.(?:[0-9]{1,3}\.){1}[0-9]{1,3}$|"
+    r"^(?:192\.168)\.(?:[0-9]{1,3}\.){1}[0-9]{1,3}$"
+)
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -99,13 +108,24 @@ def process_feed_job(message):
 
     logging.info(f"Processing feed for podcast_id {podcast_id}: {rss_url}")
 
+    # --- Pre-flight checks ---
+    # Check for private IPs before making a network request
+    hostname = requests.utils.urlparse(rss_url).hostname
+    if hostname and PRIVATE_IP_REGEX.match(hostname):
+        logging.warning(f"Skipping private/internal IP address: {rss_url}")
+        sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+        return
+
     try:
         # Use requests with timeout, then pass to feedparser
         try:
-            response = requests.get(rss_url, timeout=REQUEST_TIMEOUT, headers={
-                'User-Agent': 'PodcastIndex-Downloader/1.0'
-            })
-            response.raise_for_status()
+            response = requests.get(
+                rss_url,
+                timeout=REQUEST_TIMEOUT,
+                headers={'User-Agent': 'PodcastIndex-Downloader/1.0'},
+                verify=False  # Ignore SSL certificate errors
+            )
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
             feed = feedparser.parse(response.content)
         except requests.exceptions.RequestException as e:
             logging.warning(f"Failed to fetch feed {rss_url}: {e}")
@@ -113,6 +133,9 @@ def process_feed_job(message):
             return
 
         if feed.bozo:
+            # Setting feed.bozo to 0 suppresses the warning print by feedparser
+            # We are logging it ourselves anyway.
+            feed.bozo = 0
             logging.warning(f"Bozo feed (might be malformed): {rss_url} - {feed.bozo_exception}")
 
         if not feed.entries:
