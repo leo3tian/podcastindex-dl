@@ -75,7 +75,12 @@ def main():
     log_interval = 100000  # Log progress every 100,000 feeds
     last_log_count = 0
 
-    cursor.execute("SELECT id, url, language FROM podcasts")
+    # Randomize the order of feeds to avoid hitting any single server too quickly
+    # This is crucial for preventing rate-limiting when using multiple workers.
+    logging.info("Querying and randomizing all feeds from the database...")
+    cursor.execute("SELECT id, url, language FROM podcasts ORDER BY RANDOM()")
+    
+    logging.info("Query complete. Starting to enqueue jobs...")
     for podcast_id, rss_url, language in cursor:
         # Create a message for the SQS batch
         message = {
