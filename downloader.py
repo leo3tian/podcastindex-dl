@@ -55,8 +55,6 @@ def process_download_job(message):
         sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
         return False
 
-    logging.info(f"Processing download for: {episode_url}")
-
     # 1. Download the audio file
     try:
         response = requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True)
@@ -76,7 +74,6 @@ def process_download_job(message):
             Key=s3_key,
             Body=audio_content
         )
-        logging.info(f"Successfully uploaded to S3: s3://{S3_BUCKET_NAME}/{s3_key}")
     except Exception as e:
         logging.error(f"Failed to upload {s3_key} to S3: {e}")
         # Do not delete message, let it be retried or sent to DLQ
@@ -89,7 +86,6 @@ def process_download_job(message):
             Item={'episode_url': episode_url},
             ConditionExpression='attribute_not_exists(episode_url)'
         )
-        logging.info(f"Successfully marked {episode_url} as processed in DynamoDB.")
     except dynamodb_table.meta.client.exceptions.ConditionalCheckFailedException:
         # This is not an error. It's the expected outcome for a duplicate job.
         logging.warning(f"Race condition detected: {episode_url} was already processed. Discarding duplicate job.")
@@ -104,7 +100,6 @@ def process_download_job(message):
     # 4. If all successful, delete the message from SQS
     try:
         sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-        logging.info(f"Successfully deleted message for {episode_url}.")
     except Exception as e:
         logging.error(f"Failed to delete SQS message for {episode_url}: {e}")
         # This is not ideal, as the job might be re-processed, but the DynamoDB check will prevent re-download.
