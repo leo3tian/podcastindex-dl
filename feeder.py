@@ -8,7 +8,7 @@ import time
 
 # --- Configuration ---
 # You can change these values or set them as environment variables
-DB_PATH = os.getenv("DB_PATH", "podcastindex.db")
+DB_PATH = os.getenv("DB_PATH", "podcastindex_feeds.db")
 # This is the new queue for unprocessed feeds
 FEEDS_SQS_QUEUE_URL = os.getenv("FEEDS_SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/FeedsToProcessQueue")
 AWS_REGION = os.getenv("AWS_REGION", "us-west-1")

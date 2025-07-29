@@ -1,6 +1,8 @@
 #!/bin/bash
 dnf install -y git python3-pip
 
+cd /home/ec2-user
+
 git clone https://github.com/leo3tian/podcastindex-dl.git
 cd podcastindex-dl
 
