@@ -127,6 +127,7 @@ def process_feed_job(message):
     try:
         # Use requests with timeout, then pass to feedparser
         try:
+            logging.info(f"Fetching feed content for {rss_url}...")
             response = requests.get(
                 rss_url,
                 timeout=REQUEST_TIMEOUT,
@@ -134,6 +135,8 @@ def process_feed_job(message):
                 verify=False  # Ignore SSL certificate errors
             )
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            
+            logging.info(f"Parsing feed content for {rss_url}...")
             feed = feedparser.parse(response.content)
         except requests.exceptions.RequestException as e:
             logging.warning(f"Failed to fetch feed {rss_url}: {e}")

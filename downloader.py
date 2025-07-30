@@ -55,30 +55,28 @@ def process_download_job(message):
         sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
         return False
 
-    # 1. Download the audio file
+    # 1. Download and Stream audio file directly to S3
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
         }
-        response = requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers)
-        response.raise_for_status()
-        audio_content = response.content
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"Failed to download {episode_url}: {e}")
-        # Do not delete message, let it be retried or sent to DLQ
-        return False
+        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers) as response:
+            response.raise_for_status() # Check for bad status codes (4xx or 5xx)
 
-    # 2. Construct S3 path and upload
-    filename = sanitize_filename(episode_url)
-    s3_key = f"raw_audio/{language}/{filename}"
-    try:
-        s3_client.put_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=s3_key,
-            Body=audio_content
-        )
-    except Exception as e:
-        logging.error(f"Failed to upload {s3_key} to S3: {e}")
+            # 2. Construct S3 path and upload via stream
+            filename = sanitize_filename(episode_url)
+            s3_key = f"raw_audio/{language}/{filename}"
+
+            try:
+                # upload_fileobj streams the response body directly to S3, handling multipart uploads for large files automatically.
+                # This keeps memory usage low and constant.
+                s3_client.upload_fileobj(response.raw, S3_BUCKET_NAME, s3_key)
+            except Exception as e:
+                logging.error(f"Failed during S3 upload stream for {episode_url}: {e}")
+                return False # Let the job be retried
+
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Failed to start download stream for {episode_url}: {e}")
         # Do not delete message, let it be retried or sent to DLQ
         return False
 
