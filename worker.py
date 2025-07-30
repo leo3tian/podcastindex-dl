@@ -210,19 +210,27 @@ def send_batch_to_sqs(sqs_batch, delay_seconds=0):
     if not sqs_batch:
         return 0
     
+    # Respect the SQS maximum delay of 900 seconds (15 minutes)
+    effective_delay = min(delay_seconds, 900)
+    if delay_seconds > 900:
+        logging.warning(f"Calculated delay of {delay_seconds}s exceeds SQS limit. Capping at 900s.")
+
     # Add the delay to each message if specified
     for message in sqs_batch:
-        message['DelaySeconds'] = delay_seconds
+        message['DelaySeconds'] = effective_delay
 
     try:
         response = sqs_client.send_message_batch(
             QueueUrl=DOWNLOAD_SQS_QUEUE_URL, Entries=sqs_batch
         )
         if "Failed" in response and response["Failed"]:
-            logging.error(f"Failed to send {len(response['Failed'])} download jobs.")
+            # Log the specific failure reasons from SQS for better debugging
+            for failed_msg in response["Failed"]:
+                logging.error(f"SQS send failed for Msg ID {failed_msg['Id']}: Code={failed_msg['Code']}, Message={failed_msg['Message']}")
         return len(response.get("Successful", []))
     except Exception as e:
-        logging.error(f"Error sending batch to SQS: {e}")
+        # Log the boto3/botocore exception, which is much more informative
+        logging.error(f"Error sending batch to SQS (delay: {effective_delay}s): {e}")
         return 0
 
 
