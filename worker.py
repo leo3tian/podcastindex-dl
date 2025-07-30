@@ -276,11 +276,20 @@ def process_feed_job(message):
             feed = feedparser.parse(response.content)
         except requests.exceptions.RequestException as e:
             logging.warning(f"Failed to fetch feed {rss_url}: {e}")
-            # If it's a client error (4xx), it's a permanent failure.
+            
+            # Check for permanent failures vs. temporary ones.
+            # Client errors (4xx) and DNS/Connection errors are permanent.
+            is_permanent_failure = False
             if e.response and 400 <= e.response.status_code < 500:
+                is_permanent_failure = True
+            # NewConnectionError is a strong signal of a dead domain or firewall block.
+            elif isinstance(e, requests.exceptions.ConnectionError):
+                is_permanent_failure = True
+
+            if is_permanent_failure:
                 mark_feed_as_failed(podcast_id)
                 sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-            # Otherwise, it's a server/network error, so let it be retried.
+            # Otherwise, it's a server (5xx) or temporary network error, so let it be retried.
             return
 
         if feed.bozo:
