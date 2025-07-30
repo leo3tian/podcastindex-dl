@@ -190,6 +190,7 @@ def process_feed_job(message):
             message = {
                 "Id": str(time.time_ns()),
                 "MessageBody": json.dumps({
+                    "podcast_id": podcast_id, # Add podcast_id for S3 path
                     "episode_url": episode_url,
                     "podcast_rss_url": rss_url,
                     "language": language

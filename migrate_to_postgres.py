@@ -43,7 +43,7 @@ def get_postgres_conn():
 
 def main():
     """
-    Main migration function to move data from SQLite to PostgreSQL.
+    Main migration function to move a lean subset of data from SQLite to PostgreSQL.
     """
     # --- Connect to databases ---
     logging.info(f"Connecting to source SQLite DB: {SQLITE_DB_PATH}")
@@ -54,61 +54,25 @@ def main():
     pg_conn = get_postgres_conn()
     pg_cursor = pg_conn.cursor()
 
-    # --- Create table in PostgreSQL ---
-    logging.info("Creating 'podcasts' table in PostgreSQL...")
-    # This schema matches the original, plus the new status column.
-    # It also sets more appropriate PostgreSQL data types.
+    # --- Create lean table in PostgreSQL ---
+    logging.info("Creating lean 'podcasts' table in PostgreSQL...")
     create_table_query = """
-    CREATE TABLE IF NOT EXISTS podcasts (
+    DROP TABLE IF EXISTS podcasts;
+    CREATE TABLE podcasts (
         id BIGINT PRIMARY KEY,
-        url TEXT UNIQUE,
-        title TEXT,
-        lastUpdate BIGINT,
-        link TEXT,
-        lastHttpStatus INT,
-        dead INT,
-        contentType TEXT,
-        itunesId BIGINT,
-        originalUrl TEXT,
-        itunesAuthor TEXT,
-        itunesOwnerName TEXT,
-        explicit INT,
-        imageUrl TEXT,
-        itunesType TEXT,
-        generator TEXT,
-        newestItemPubdate BIGINT,
+        url TEXT UNIQUE NOT NULL,
         language TEXT,
-        oldestItemPubdate BIGINT,
-        episodeCount INT,
-        popularityScore INT,
-        priority INT,
-        createdOn BIGINT,
-        updateFrequency INT,
-        chash TEXT,
-        host TEXT,
-        newestEnclosureUrl TEXT,
-        podcastGuid TEXT,
-        description TEXT,
-        category1 TEXT,
-        category2 TEXT,
-        category3 TEXT,
-        category4 TEXT,
-        category5 TEXT,
-        category6 TEXT,
-        category7 TEXT,
-        category8 TEXT,
-        category9 TEXT,
-        category10 TEXT,
-        newestEnclosureDuration INT,
-        processing_status TEXT DEFAULT 'pending' NOT NULL
+        processing_status TEXT DEFAULT 'pending' NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
     """
     pg_cursor.execute(create_table_query)
     pg_conn.commit()
-    logging.info("Table 'podcasts' created successfully (if it didn't exist).")
+    logging.info("Lean table 'podcasts' created successfully.")
 
     # --- Fetch data from SQLite and insert into PostgreSQL ---
-    sqlite_cursor.execute("SELECT * FROM podcasts")
+    # We only select the columns we need now.
+    sqlite_cursor.execute("SELECT id, url, language FROM podcasts")
     total_rows_migrated = 0
 
     while True:
@@ -116,19 +80,12 @@ def main():
         if not batch:
             break
 
-        # Prepare the data for insertion
-        records_to_insert = []
-        for row in batch:
-            # Add the 'pending' status to each row
-            records_to_insert.append(row + ('pending',))
-
-        # Build the INSERT statement
-        # This uses %s placeholders, which psycopg2 safely populates.
-        # It handles the 39 columns from SQLite + 1 new status column.
-        placeholders = ", ".join(["%s"] * 40)
-        insert_query = f"INSERT INTO podcasts VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING"
+        # The executemany function is smart enough to map the columns.
+        # We are inserting into 'id', 'url', and 'language'. 'processing_status'
+        # will use its default value of 'pending'.
+        insert_query = "INSERT INTO podcasts (id, url, language) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING"
         
-        pg_cursor.executemany(insert_query, records_to_insert)
+        pg_cursor.executemany(insert_query, batch)
         pg_conn.commit()
 
         total_rows_migrated += len(batch)
@@ -137,7 +94,7 @@ def main():
     # --- Clean up ---
     sqlite_conn.close()
     pg_conn.close()
-    logging.info(f"--- Migration complete! Total records migrated: {total_rows_migrated:,} ---")
+    logging.info(f"--- Lean migration complete! Total records migrated: {total_rows_migrated:,} ---")
 
 
 if __name__ == "__main__":

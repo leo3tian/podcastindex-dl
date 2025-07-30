@@ -7,6 +7,7 @@ import logging
 import time
 import re
 from urllib.parse import urlparse
+import hashlib
 
 # --- Configuration ---
 DOWNLOAD_SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/PodcastIndexQueue")
@@ -39,6 +40,27 @@ def sanitize_filename(url):
     # Ensure it's not too long
     return safe_path[-128:]
 
+def get_s3_key(podcast_id, language, episode_url):
+    """
+    Creates a unique, collision-proof S3 key.
+    Path: raw_audio/{language}/{podcast_id}/{sha256_hash}.{extension}
+    """
+    # 1. Get the file extension
+    path = urlparse(episode_url).path
+    # Fallback to .mp3 if no extension is found
+    _, _, ext = path.rpartition('.')
+    if not ext or len(ext) > 4:
+        ext = 'mp3'
+
+    # 2. Create a SHA256 hash of the URL for a unique filename
+    full_hash = hashlib.sha256(episode_url.encode('utf-8')).hexdigest()
+    # Use a 16-character prefix as a safe and short unique identifier
+    short_hash = full_hash[:16]
+
+    # 3. Construct the final key
+    return f"raw_audio/{language}/{podcast_id}/{short_hash}.{ext}"
+
+
 def process_download_job(message):
     """
     Processes a single download job from the SQS queue.
@@ -49,6 +71,7 @@ def process_download_job(message):
     try:
         body = json.loads(message['Body'])
         episode_url = body['episode_url']
+        podcast_id = body['podcast_id']
         language = body.get('language', 'unknown')
     except (KeyError, json.JSONDecodeError) as e:
         logging.error(f"Invalid message format, deleting from queue: {message['Body']} - {e}")
@@ -60,12 +83,11 @@ def process_download_job(message):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
         }
-        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
+        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers) as response:
             response.raise_for_status() # Check for bad status codes (4xx or 5xx)
 
             # 2. Construct S3 path and upload via stream
-            filename = sanitize_filename(episode_url)
-            s3_key = f"raw_audio/{language}/{filename}"
+            s3_key = get_s3_key(podcast_id, language, episode_url)
 
             try:
                 # upload_fileobj streams the response body directly to S3, handling multipart uploads for large files automatically.
@@ -108,7 +130,7 @@ def process_download_job(message):
         logging.error(f"Failed to delete SQS message for {episode_url}: {e}")
         # This is not ideal, as the job might be re-processed, but the DynamoDB check will prevent re-download.
         return False
-    
+
     # Return True only if it was a new download, not a duplicate.
     return not is_duplicate
 
@@ -122,7 +144,7 @@ def main():
 
     logging.info("--- Starting Downloader Script ---")
     logging.info(f"Polling SQS Queue: {DOWNLOAD_SQS_QUEUE_URL}")
-    
+
     downloads_completed = 0
     log_interval = 10
 
