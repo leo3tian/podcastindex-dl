@@ -336,12 +336,9 @@ def process_feed_job(message):
         if total_to_enqueue > STAGGER_THRESHOLD:
             logging.warning(f"Large feed detected ({total_to_enqueue} new episodes). Staggering enqueue to SQS.")
             current_delay = 0
-            # The outer loop determines which large chunk of jobs gets a specific delay
             for i in range(0, total_to_enqueue, STAGGER_BATCH_SIZE):
                 staggered_chunk = new_episodes_to_enqueue[i:i + STAGGER_BATCH_SIZE]
-                logging.info(f"Sending a staggered chunk of {len(staggered_chunk)} jobs with a base delay of {current_delay}s...")
-
-                # The inner loop respects the SQS API limit of 10
+                
                 sqs_api_batch = []
                 for episode_url in staggered_chunk:
                     sqs_api_batch.append({
@@ -350,19 +347,25 @@ def process_feed_job(message):
                     })
                     if len(sqs_api_batch) == SQS_BATCH_SIZE:
                         sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
+                        episodes_enqueued += sent_count
                         if sent_count < len(sqs_api_batch):
                             all_batches_successful = False
-                            break # Break inner loop
-                        episodes_enqueued += sent_count
+                            break
                         sqs_api_batch.clear()
                 
-                # Send any remainder from the staggered chunk
+                if not all_batches_successful:
+                    break
+                
                 if sqs_api_batch:
                     sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
+                    episodes_enqueued += sent_count
                     if sent_count < len(sqs_api_batch):
                         all_batches_successful = False
+                
+                if not all_batches_successful:
+                    break
+                
                 current_delay += STAGGER_DELAY_SECONDS
-            if not all_batches_successful: break # Break outer loop
         else:
             # --- Standard Logic for smaller feeds ---
             sqs_batch = []
@@ -378,14 +381,15 @@ def process_feed_job(message):
                 sqs_batch.append(message_to_send)
                 if len(sqs_batch) == SQS_BATCH_SIZE:
                     sent_count = send_batch_to_sqs(sqs_batch)
+                    episodes_enqueued += sent_count
                     if sent_count < len(sqs_batch):
                         all_batches_successful = False
-                        break # Break inner loop
-                    episodes_enqueued += sent_count
+                        break
                     sqs_batch.clear()
             
-            if sqs_batch:
+            if all_batches_successful and sqs_batch:
                 sent_count = send_batch_to_sqs(sqs_batch)
+                episodes_enqueued += sent_count
                 if sent_count < len(sqs_batch):
                     all_batches_successful = False
 
