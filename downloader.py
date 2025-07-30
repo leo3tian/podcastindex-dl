@@ -57,16 +57,9 @@ def process_download_job(message):
 
     # 1. Download and Stream audio file directly to S3
     try:
-        # hearthis.at seems to throttle requests with a common browser User-Agent from server IPs.
-        # For this domain, we will use the default python-requests User-Agent.
-        # For all other domains, we'll use a browser-like User-Agent.
-        if 'hearthis.at' in episode_url:
-            headers = {}
-        else:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-            }
-            
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+        }
         with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
             response.raise_for_status() # Check for bad status codes (4xx or 5xx)
 
