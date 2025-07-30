@@ -60,7 +60,7 @@ def process_download_job(message):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
         }
-        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers) as response:
+        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
             response.raise_for_status() # Check for bad status codes (4xx or 5xx)
 
             # 2. Construct S3 path and upload via stream
@@ -70,7 +70,9 @@ def process_download_job(message):
             try:
                 # upload_fileobj streams the response body directly to S3, handling multipart uploads for large files automatically.
                 # This keeps memory usage low and constant.
+                logging.info(f"Starting S3 upload stream for {episode_url} to s3://{S3_BUCKET_NAME}/{s3_key}")
                 s3_client.upload_fileobj(response.raw, S3_BUCKET_NAME, s3_key)
+                logging.info(f"Finished S3 upload stream for {episode_url}")
             except Exception as e:
                 logging.error(f"Failed during S3 upload stream for {episode_url}: {e}")
                 return False # Let the job be retried
