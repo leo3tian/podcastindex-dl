@@ -30,7 +30,7 @@ STAGGER_THRESHOLD = 20
 # How many jobs to send in each staggered batch
 STAGGER_BATCH_SIZE = 20
 # How many seconds to delay each subsequent batch
-STAGGER_DELAY_SECONDS = 60
+STAGGER_DELAY_SECONDS = 30
 
 # --- AWS / DB Config ---
 PG_HOST = os.getenv("PG_HOST")
