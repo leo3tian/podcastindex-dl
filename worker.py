@@ -8,6 +8,7 @@ import time
 import requests
 import re
 import urllib3
+import psycopg2
 
 # Suppress only the InsecureRequestWarning from urllib3, as we are intentionally
 # disabling SSL verification for some feeds.
@@ -21,6 +22,21 @@ FEEDS_SQS_QUEUE_URL = os.getenv("FEEDS_SQS_QUEUE_URL", "https://sqs.us-west-1.am
 DOWNLOAD_SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/PodcastIndexQueue")
 DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "PodcastIndexJobs")
 AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
+
+# --- Tuning Levers ---
+DB_UPDATE_BATCH_SIZE = int(os.getenv("DB_UPDATE_BATCH_SIZE", 100))
+# The threshold at which we start staggering SQS messages
+STAGGER_THRESHOLD = 20
+# How many jobs to send in each staggered batch
+STAGGER_BATCH_SIZE = 20
+# How many seconds to delay each subsequent batch
+STAGGER_DELAY_SECONDS = 60
+
+# --- AWS / DB Config ---
+PG_HOST = os.getenv("PG_HOST")
+PG_DATABASE = os.getenv("PG_DATABASE")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
 
 # --- Constants ---
 SQS_BATCH_SIZE = 10  # For sending to the download queue
@@ -36,7 +52,7 @@ PRIVATE_IP_REGEX = re.compile(
 # Use a tuple for (connect_timeout, read_timeout)
 # Connect: How long to wait for a connection to be established.
 # Read: How long to wait for the server to send data once connected.
-REQUEST_TIMEOUT = (3, 18)  # 5-second connect timeout, 25-second read timeout
+REQUEST_TIMEOUT = (5, 25)  # 5-second connect timeout, 25-second read timeout
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -45,10 +61,95 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-# --- AWS Clients ---
+# --- AWS / DB Clients ---
 sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 dynamodb_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+
+# --- Global State ---
+# Workers will batch DB updates for efficiency. These lists hold pending updates.
+COMPLETED_IDS_BATCH = []
+FAILED_IDS_BATCH = []
+# Global DB Connection - Workers can reuse a single connection for their lifetime.
+pg_conn = None
+
+def flush_db_update_batch(status, force_flush=False):
+    """
+    Writes a batch of completed or failed IDs to the database.
+    A flush is triggered when the batch is full or on a forced flush (e.g., shutdown).
+    """
+    conn = get_postgres_conn()
+    if not conn:
+        logging.error("Cannot flush DB batch: No DB connection.")
+        return
+
+    id_list = []
+    batch_size_to_check = DB_UPDATE_BATCH_SIZE
+    
+    if status == 'complete':
+        if not COMPLETED_IDS_BATCH: return
+        # Only flush if the batch is full or if we're forcing it on shutdown
+        if len(COMPLETED_IDS_BATCH) >= batch_size_to_check or force_flush:
+            id_list = list(COMPLETED_IDS_BATCH)
+            COMPLETED_IDS_BATCH.clear()
+        else:
+            return
+    elif status == 'failed':
+        if not FAILED_IDS_BATCH: return
+        if len(FAILED_IDS_BATCH) >= batch_size_to_check or force_flush:
+            id_list = list(FAILED_IDS_BATCH)
+            FAILED_IDS_BATCH.clear()
+        else:
+            return
+    else:
+        return
+
+    logging.info(f"Flushing {len(id_list)} records to DB with status '{status}'...")
+    try:
+        with conn.cursor() as cursor:
+            # Use a transaction to update the batch
+            cursor.execute(
+                f"UPDATE podcasts SET processing_status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = ANY(%s)",
+                (status, id_list)
+            )
+        conn.commit()
+    except psycopg2.Error as e:
+        logging.error(f"DB Error flushing batch for status '{status}': {e}. Re-queuing IDs.")
+        conn.rollback() # Rollback the failed transaction
+        conn.close() # Force reconnect
+        # On failure, add the IDs back to the global list to be retried.
+        if status == 'complete':
+            COMPLETED_IDS_BATCH.extend(id_list)
+        elif status == 'failed':
+            FAILED_IDS_BATCH.extend(id_list)
+
+def get_postgres_conn():
+    """Establishes or returns the global PostgreSQL connection."""
+    global pg_conn
+    if pg_conn and not pg_conn.closed:
+        return pg_conn
+    
+    if not all([PG_HOST, PG_DATABASE, PG_USER, PG_PASSWORD]):
+        logging.error("Missing required PostgreSQL environment variables.")
+        return None
+    try:
+        pg_conn = psycopg2.connect(
+            host=PG_HOST, database=PG_DATABASE, user=PG_USER, password=PG_PASSWORD
+        )
+        return pg_conn
+    except psycopg2.OperationalError as e:
+        logging.error(f"Could not connect to PostgreSQL database: {e}")
+        return None
+
+def mark_feed_as_complete(podcast_id):
+    """Adds a podcast ID to the batch to be marked as 'complete'."""
+    COMPLETED_IDS_BATCH.append(podcast_id)
+    flush_db_update_batch('complete')
+
+def mark_feed_as_failed(podcast_id):
+    """Adds a podcast ID to the batch to be marked as 'failed'."""
+    FAILED_IDS_BATCH.append(podcast_id)
+    flush_db_update_batch('failed')
 
 
 def get_existing_episodes(episode_urls):
@@ -78,21 +179,21 @@ def get_existing_episodes(episode_urls):
     return existing_urls
 
 
-def send_batch_to_sqs(sqs_batch):
-    """Sends a batch of messages to the final download SQS queue."""
+def send_batch_to_sqs(sqs_batch, delay_seconds=0):
+    """Sends a batch of messages to the final download SQS queue, with an optional delay."""
     if not sqs_batch:
         return 0
+    
+    # Add the delay to each message if specified
+    for message in sqs_batch:
+        message['DelaySeconds'] = delay_seconds
 
     try:
         response = sqs_client.send_message_batch(
             QueueUrl=DOWNLOAD_SQS_QUEUE_URL, Entries=sqs_batch
         )
-        if "Successful" in response:
-            logging.info(f"Successfully sent {len(response['Successful'])} download jobs.")
         if "Failed" in response and response["Failed"]:
             logging.error(f"Failed to send {len(response['Failed'])} download jobs.")
-            for failed_msg in response["Failed"]:
-                logging.error(f"  - Failed Msg ID: {failed_msg['Id']}, Reason: {failed_msg['Message']}")
         return len(response.get("Successful", []))
     except Exception as e:
         logging.error(f"Error sending batch to SQS: {e}")
@@ -121,6 +222,7 @@ def process_feed_job(message):
     hostname = requests.utils.urlparse(rss_url).hostname
     if hostname and PRIVATE_IP_REGEX.match(hostname):
         logging.warning(f"Skipping private/internal IP address: {rss_url}")
+        mark_feed_as_failed(podcast_id)
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
         return
 
@@ -140,7 +242,8 @@ def process_feed_job(message):
             feed = feedparser.parse(response.content)
         except requests.exceptions.RequestException as e:
             logging.warning(f"Failed to fetch feed {rss_url}: {e}")
-            sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+            # Do not delete message. Let it be retried.
+            # We don't mark as failed because it might be a temporary network issue.
             return
 
         if feed.bozo:
@@ -181,68 +284,100 @@ def process_feed_job(message):
 
         if not new_episodes_to_enqueue:
             logging.info(f"No new episodes to enqueue for {rss_url}.")
+            mark_feed_as_complete(podcast_id) # Mark as complete even if no new episodes
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
-        sqs_batch = []
         episodes_enqueued = 0
-        for episode_url in new_episodes_to_enqueue:
-            message = {
-                "Id": str(time.time_ns()),
-                "MessageBody": json.dumps({
-                    "podcast_id": podcast_id, # Add podcast_id for S3 path
-                    "episode_url": episode_url,
-                    "podcast_rss_url": rss_url,
-                    "language": language
-                })
-            }
-            sqs_batch.append(message)
-            if len(sqs_batch) == SQS_BATCH_SIZE:
-                episodes_enqueued += send_batch_to_sqs(sqs_batch)
-                sqs_batch.clear()
+        total_to_enqueue = len(new_episodes_to_enqueue)
 
-        if sqs_batch:
-            episodes_enqueued += send_batch_to_sqs(sqs_batch)
+        # --- Staggering Logic ---
+        if total_to_enqueue > STAGGER_THRESHOLD:
+            logging.warning(f"Large feed detected ({total_to_enqueue} new episodes). Staggering enqueue to SQS.")
+            current_delay = 0
+            for i in range(0, total_to_enqueue, STAGGER_BATCH_SIZE):
+                batch_urls = new_episodes_to_enqueue[i:i + STAGGER_BATCH_SIZE]
+                sqs_batch = []
+                for episode_url in batch_urls:
+                    sqs_batch.append({
+                        "Id": str(time.time_ns()),
+                        "MessageBody": json.dumps({"episode_url": episode_url, "podcast_rss_url": rss_url, "language": language})
+                    })
+                
+                logging.info(f"Sending batch of {len(sqs_batch)} jobs with {current_delay}s delay...")
+                episodes_enqueued += send_batch_to_sqs(sqs_batch, delay_seconds=current_delay)
+                current_delay += STAGGER_DELAY_SECONDS
+        else:
+            # --- Standard Logic for smaller feeds ---
+            sqs_batch = []
+            for episode_url in new_episodes_to_enqueue:
+                message_to_send = {
+                    "Id": str(time.time_ns()),
+                    "MessageBody": json.dumps({
+                        "episode_url": episode_url,
+                        "podcast_rss_url": rss_url,
+                        "language": language
+                    })
+                }
+                sqs_batch.append(message_to_send)
+                if len(sqs_batch) == SQS_BATCH_SIZE:
+                    episodes_enqueued += send_batch_to_sqs(sqs_batch)
+                    sqs_batch.clear()
+            
+            if sqs_batch:
+                episodes_enqueued += send_batch_to_sqs(sqs_batch)
 
         logging.info(f"Successfully enqueued {episodes_enqueued} new episodes for {rss_url}.")
+        mark_feed_as_complete(podcast_id)
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
 
     except Exception as e:
         logging.error(f"Failed to process feed {rss_url}: {e}", exc_info=True)
-        # Do not delete message from queue, let it be retried
+        # For unexpected errors, mark as failed so we don't retry indefinitely
+        mark_feed_as_failed(podcast_id)
+        sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
 
 
 def main():
     """
     Main worker loop to continuously poll for and process feed jobs.
     """
-    if not FEEDS_SQS_QUEUE_URL or not DOWNLOAD_SQS_QUEUE_URL or not DYNAMODB_TABLE_NAME:
+    if not all([FEEDS_SQS_QUEUE_URL, DOWNLOAD_SQS_QUEUE_URL, DYNAMODB_TABLE_NAME, PG_HOST]):
         logging.error("Missing required environment variables.")
         sys.exit(1)
 
     logging.info("--- Starting Worker Script ---")
     logging.info(f"Polling SQS Queue: {FEEDS_SQS_QUEUE_URL}")
-    while True:
-        try:
-            response = sqs_client.receive_message(
-                QueueUrl=FEEDS_SQS_QUEUE_URL,
-                MaxNumberOfMessages=1,
-                WaitTimeSeconds=20, # Use long polling
-                AttributeNames=['All']
-            )
+    logging.info(f"DB Update Batch Size: {DB_UPDATE_BATCH_SIZE}")
 
-            if "Messages" in response:
-                for message in response["Messages"]:
-                    process_feed_job(message)
-            else:
-                logging.info("Queue is empty, waiting for new messages...")
-                # Optional: break here if you want the script to exit when the queue is empty
-                # break
+    try:
+        while True:
+            try:
+                response = sqs_client.receive_message(
+                    QueueUrl=FEEDS_SQS_QUEUE_URL,
+                    MaxNumberOfMessages=10, # Fetch more messages to improve throughput
+                    WaitTimeSeconds=20,
+                    AttributeNames=['All']
+                )
+                if "Messages" in response:
+                    for message in response["Messages"]:
+                        process_feed_job(message)
+                else:
+                    logging.info("Queue is empty, waiting for new messages...")
+                    # Flush any lingering items if the queue is empty
+                    flush_db_update_batch('complete', force_flush=True)
+                    flush_db_update_batch('failed', force_flush=True)
 
-        except Exception as e:
-            logging.error(f"An error occurred in the main loop: {e}")
-            time.sleep(10) # Wait before retrying
-
+            except Exception as e:
+                logging.error(f"An error occurred in the main SQS loop: {e}")
+                time.sleep(10) # Wait before retrying
+    finally:
+        logging.info("--- Shutting down. Flushing final DB update batches... ---")
+        flush_db_update_batch('complete', force_flush=True)
+        flush_db_update_batch('failed', force_flush=True)
+        if pg_conn:
+            pg_conn.close()
+            logging.info("PostgreSQL connection closed.")
 
 if __name__ == "__main__":
     main() 
