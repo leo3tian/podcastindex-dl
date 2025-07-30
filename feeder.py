@@ -96,7 +96,7 @@ def reset_stale_jobs(conn):
 def main():
     """
     Main feeder loop. Continuously pulls pending jobs from Postgres,
-    marks them as in_progress, enqueues them to SQS, and cleans up stale jobs.
+    enqueues them, and then marks them as in_progress.
     """
     logging.info("--- Starting Feeder Manager Script ---")
     logging.info(f"Batch Size: {FEEDER_BATCH_SIZE}, Sleep Time: {FEEDER_SLEEP_SECONDS}s, Stale Timeout: {STALE_JOB_TIMEOUT_MINUTES}min")
@@ -107,6 +107,7 @@ def main():
 
     loop_count = 0
     while True:
+        jobs_to_enqueue = []
         try:
             # --- Janitor Duty: Reset stale jobs every 5 loops ---
             loop_count += 1
@@ -114,53 +115,66 @@ def main():
                 reset_stale_jobs(pg_conn)
 
             with pg_conn.cursor() as pg_cursor:
-                # This transaction is critical. It finds pending rows, locks them so no other
-                # feeder can touch them, and returns their data in a single, atomic operation.
-                # 'FOR UPDATE SKIP LOCKED' is designed for exactly this kind of concurrent queue processing.
+                # STEP 1: Select and lock a batch of 'pending' jobs.
+                # 'FOR UPDATE SKIP LOCKED' ensures that if you run multiple feeders,
+                # they will not grab the same rows.
                 pg_cursor.execute("""
-                    UPDATE podcasts
-                    SET processing_status = 'in_progress', updated_at = CURRENT_TIMESTAMP
-                    WHERE id IN (
-                        SELECT id
-                        FROM podcasts
-                        WHERE processing_status = 'pending'
-                        ORDER BY id
-                        FOR UPDATE SKIP LOCKED
-                        LIMIT %s
-                    )
-                    RETURNING id, url, language;
+                    SELECT id, url, language
+                    FROM podcasts
+                    WHERE processing_status = 'pending'
+                    ORDER BY id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT %s;
                 """, (FEEDER_BATCH_SIZE,))
                 
                 jobs_to_enqueue = pg_cursor.fetchall()
-                pg_conn.commit()
+                # DO NOT commit here. The transaction lock is held until we commit.
 
             if not jobs_to_enqueue:
                 logging.info("No pending feeds found. Waiting...")
-                time.sleep(FEEDER_SLEEP_SECONDS * 2) # Sleep longer if there's no work
+                time.sleep(FEEDER_SLEEP_SECONDS * 2)
                 continue
 
-            logging.info(f"Found and locked {len(jobs_to_enqueue)} new jobs. Enqueueing to SQS...")
+            # STEP 2: Try to enqueue the locked jobs to SQS.
+            logging.info(f"Found and locked {len(jobs_to_enqueue)} new jobs. Attempting to enqueue...")
             
             sqs_batch = []
+            successfully_enqueued_ids = []
             for job in jobs_to_enqueue:
                 podcast_id, rss_url, language = job
                 message = {
                     "Id": str(podcast_id),
                     "MessageBody": json.dumps({
-                        "podcast_id": podcast_id,
-                        "rss_url": rss_url,
-                        "language": (language and language.strip()) or "unknown" # Sanitize language
+                        "podcast_id": podcast_id, "rss_url": rss_url,
+                        "language": (language and language.strip()) or "unknown"
                     })
                 }
                 sqs_batch.append(message)
                 if len(sqs_batch) == SQS_BATCH_SIZE:
-                    send_batch_to_sqs(sqs_batch)
+                    sent_ids = send_batch_to_sqs(sqs_batch)
+                    successfully_enqueued_ids.extend(sent_ids)
                     sqs_batch.clear()
             
             if sqs_batch: # Send any remaining messages
-                send_batch_to_sqs(sqs_batch)
+                sent_ids = send_batch_to_sqs(sqs_batch)
+                successfully_enqueued_ids.extend(sent_ids)
+            
+            if not successfully_enqueued_ids:
+                logging.error("Failed to enqueue any jobs to SQS. Rolling back DB transaction.")
+                pg_conn.rollback() # Release the locks without making changes
+                time.sleep(15)
+                continue
 
-            logging.info(f"Successfully enqueued {len(jobs_to_enqueue)} jobs. Sleeping for {FEEDER_SLEEP_SECONDS}s.")
+            # STEP 3: Only update the status for jobs that were successfully sent to SQS.
+            with pg_conn.cursor() as pg_cursor:
+                pg_cursor.execute("""
+                    UPDATE podcasts
+                    SET processing_status = 'in_progress', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ANY(%s);
+                """, (successfully_enqueued_ids,))
+            
+            pg_conn.commit() # Commit the transaction, releasing the locks.
+            logging.info(f"Successfully enqueued and updated {len(successfully_enqueued_ids)} jobs. Sleeping for {FEEDER_SLEEP_SECONDS}s.")
             time.sleep(FEEDER_SLEEP_SECONDS)
 
         except psycopg2.Error as e:

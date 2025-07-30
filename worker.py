@@ -101,6 +101,13 @@ def flush_db_update_batch(status, force_flush=False):
             FAILED_IDS_BATCH.clear()
         else:
             return
+    elif status == 'complete_empty':
+        if not COMPLETED_IDS_BATCH: return
+        if len(COMPLETED_IDS_BATCH) >= batch_size_to_check or force_flush:
+            id_list = list(COMPLETED_IDS_BATCH)
+            COMPLETED_IDS_BATCH.clear()
+        else:
+            return
     else:
         return
 
@@ -122,6 +129,8 @@ def flush_db_update_batch(status, force_flush=False):
             COMPLETED_IDS_BATCH.extend(id_list)
         elif status == 'failed':
             FAILED_IDS_BATCH.extend(id_list)
+        elif status == 'complete_empty':
+            COMPLETED_IDS_BATCH.extend(id_list)
 
 def get_postgres_conn():
     """Establishes or returns the global PostgreSQL connection."""
@@ -141,15 +150,32 @@ def get_postgres_conn():
         logging.error(f"Could not connect to PostgreSQL database: {e}")
         return None
 
+# --- New Status ---
+# 'complete_empty' is for feeds that parse correctly but have no valid audio.
+def mark_feed_as_status(podcast_id, status):
+    """Generic function to add a podcast ID to the correct batch for a given status."""
+    if status == 'complete':
+        COMPLETED_IDS_BATCH.append(podcast_id)
+    elif status == 'failed':
+        FAILED_IDS_BATCH.append(podcast_id)
+    elif status == 'complete_empty':
+        # For now, we'll treat empty feeds as a success state.
+        # We can create a separate list/logic later if needed.
+        COMPLETED_IDS_BATCH.append(podcast_id)
+    else:
+        logging.warning(f"Unknown status '{status}' for podcast_id {podcast_id}")
+        return
+    
+    # Flush the appropriate batch
+    flush_db_update_batch(status)
+
 def mark_feed_as_complete(podcast_id):
     """Adds a podcast ID to the batch to be marked as 'complete'."""
-    COMPLETED_IDS_BATCH.append(podcast_id)
-    flush_db_update_batch('complete')
+    mark_feed_as_status(podcast_id, 'complete')
 
 def mark_feed_as_failed(podcast_id):
     """Adds a podcast ID to the batch to be marked as 'failed'."""
-    FAILED_IDS_BATCH.append(podcast_id)
-    flush_db_update_batch('failed')
+    mark_feed_as_status(podcast_id, 'failed')
 
 
 def get_existing_episodes(episode_urls):
@@ -242,8 +268,11 @@ def process_feed_job(message):
             feed = feedparser.parse(response.content)
         except requests.exceptions.RequestException as e:
             logging.warning(f"Failed to fetch feed {rss_url}: {e}")
-            # Do not delete message. Let it be retried.
-            # We don't mark as failed because it might be a temporary network issue.
+            # If it's a client error (4xx), it's a permanent failure.
+            if e.response and 400 <= e.response.status_code < 500:
+                mark_feed_as_failed(podcast_id)
+                sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+            # Otherwise, it's a server/network error, so let it be retried.
             return
 
         if feed.bozo:
@@ -274,6 +303,8 @@ def process_feed_job(message):
 
         if not all_episode_urls:
             logging.warning(f"No audio enclosures found in feed: {rss_url}")
+            # Use our new status for better data integrity
+            mark_feed_as_status(podcast_id, 'complete_empty')
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
@@ -288,9 +319,11 @@ def process_feed_job(message):
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
-        episodes_enqueued = 0
+        # --- Enqueueing with All-or-Nothing Logic ---
         total_to_enqueue = len(new_episodes_to_enqueue)
-
+        episodes_enqueued = 0
+        all_batches_successful = True
+        
         # --- Staggering Logic ---
         if total_to_enqueue > STAGGER_THRESHOLD:
             logging.warning(f"Large feed detected ({total_to_enqueue} new episodes). Staggering enqueue to SQS.")
@@ -308,14 +341,20 @@ def process_feed_job(message):
                         "MessageBody": json.dumps({"episode_url": episode_url, "podcast_rss_url": rss_url, "language": language})
                     })
                     if len(sqs_api_batch) == SQS_BATCH_SIZE:
-                        episodes_enqueued += send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
+                        sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
+                        if sent_count < len(sqs_api_batch):
+                            all_batches_successful = False
+                            break # Break inner loop
+                        episodes_enqueued += sent_count
                         sqs_api_batch.clear()
                 
                 # Send any remainder from the staggered chunk
                 if sqs_api_batch:
-                    episodes_enqueued += send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
-
+                    sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
+                    if sent_count < len(sqs_api_batch):
+                        all_batches_successful = False
                 current_delay += STAGGER_DELAY_SECONDS
+            if not all_batches_successful: break # Break outer loop
         else:
             # --- Standard Logic for smaller feeds ---
             sqs_batch = []
@@ -330,15 +369,25 @@ def process_feed_job(message):
                 }
                 sqs_batch.append(message_to_send)
                 if len(sqs_batch) == SQS_BATCH_SIZE:
-                    episodes_enqueued += send_batch_to_sqs(sqs_batch)
+                    sent_count = send_batch_to_sqs(sqs_batch)
+                    if sent_count < len(sqs_batch):
+                        all_batches_successful = False
+                        break # Break inner loop
+                    episodes_enqueued += sent_count
                     sqs_batch.clear()
             
             if sqs_batch:
-                episodes_enqueued += send_batch_to_sqs(sqs_batch)
+                sent_count = send_batch_to_sqs(sqs_batch)
+                if sent_count < len(sqs_batch):
+                    all_batches_successful = False
 
-        logging.info(f"Successfully enqueued {episodes_enqueued} new episodes for {rss_url}.")
-        mark_feed_as_complete(podcast_id)
-        sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+        if all_batches_successful:
+            logging.info(f"Successfully enqueued all {episodes_enqueued} new episodes for {rss_url}.")
+            mark_feed_as_complete(podcast_id)
+            sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
+        else:
+            logging.error(f"Failed to enqueue all episodes for {rss_url}. Enqueued {episodes_enqueued}/{total_to_enqueue}. Will be retried.")
+            # DO NOT mark as complete. DO NOT delete SQS message. Let the job time out.
 
     except Exception as e:
         logging.error(f"Failed to process feed {rss_url}: {e}", exc_info=True)
@@ -376,6 +425,7 @@ def main():
                     # Flush any lingering items if the queue is empty
                     flush_db_update_batch('complete', force_flush=True)
                     flush_db_update_batch('failed', force_flush=True)
+                    flush_db_update_batch('complete_empty', force_flush=True)
 
             except Exception as e:
                 logging.error(f"An error occurred in the main SQS loop: {e}")
@@ -384,6 +434,7 @@ def main():
         logging.info("--- Shutting down. Flushing final DB update batches... ---")
         flush_db_update_batch('complete', force_flush=True)
         flush_db_update_batch('failed', force_flush=True)
+        flush_db_update_batch('complete_empty', force_flush=True)
         if pg_conn:
             pg_conn.close()
             logging.info("PostgreSQL connection closed.")
