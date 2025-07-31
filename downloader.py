@@ -11,20 +11,6 @@ import hashlib
 import signal
 
 
-# --- Custom Exception & Handler for Download Timeouts ---
-class DownloadTimeoutError(Exception):
-    """Custom exception raised when a download operation takes too long."""
-    pass
-
-def _timeout_handler(signum, frame):
-    """Signal handler that raises our custom exception."""
-    raise DownloadTimeoutError()
-
-
-# Register the signal handler for the alarm signal (SIGALRM)
-signal.signal(signal.SIGALRM, _timeout_handler)
-
-
 # --- Configuration ---
 DOWNLOAD_SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/PodcastIndexQueue")
 DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "PodcastIndexJobs")
@@ -33,6 +19,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
 # --- Timeouts ---
 REQUEST_TIMEOUT = (5, 60)  # 5s connect, 60s read (generous for large audio files)
+MAX_DOWNLOAD_TIME = 120  # 2 minutes
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -45,6 +32,18 @@ logging.basicConfig(
 sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 dynamodb_table = boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE_NAME)
+
+# --- Custom Exception & Handler for Download Timeouts ---
+class DownloadTimeoutError(Exception):
+    """Custom exception raised when a download operation takes too long."""
+    pass
+
+def _timeout_handler(signum, frame):
+    """Signal handler that raises our custom exception."""
+    raise DownloadTimeoutError()
+
+# Register the signal handler for the alarm signal (SIGALRM)
+signal.signal(signal.SIGALRM, _timeout_handler)
 
 def sanitize_filename(url):
     """Creates a safe filename from a URL, preserving the extension."""
@@ -115,7 +114,7 @@ def process_download_job(message):
         try:
             # Set an alarm for the entire operation. If it takes longer than 120
             # seconds, the _timeout_handler will raise DownloadTimeoutError.
-            signal.alarm(120)
+            signal.alarm(MAX_DOWNLOAD_TIME)
 
             # 1. Download and Stream audio file directly to S3
             try:
@@ -149,7 +148,7 @@ def process_download_job(message):
                 return False
 
         except DownloadTimeoutError:
-            logging.warning(f"Skipping download for {episode_url}: operation took longer than 2 minutes.")
+            logging.warning(f"Skipping download for {episode_url}: operation took longer than {MAX_DOWNLOAD_TIME} seconds.")
             return False # Let SQS handle retries/DLQ
         finally:
             # Crucial: Always disable the alarm when this block is exited,
