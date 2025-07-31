@@ -382,6 +382,7 @@ def process_feed_job(message):
                 message_to_send = {
                     "Id": str(time.time_ns()),
                     "MessageBody": json.dumps({
+                        "podcast_id": podcast_id, # This was the missing field
                         "episode_url": episode_url,
                         "podcast_rss_url": rss_url,
                         "language": language
