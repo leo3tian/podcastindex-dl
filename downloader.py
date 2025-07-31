@@ -48,8 +48,8 @@ def get_s3_key(podcast_id, language, episode_url):
     # 1. Get the file extension
     path = urlparse(episode_url).path
     # Fallback to .mp3 if no extension is found
-    _, _, ext = path.rpartition('.')
-    if not ext or len(ext) > 4:
+    # If there's no extension, or it's unreasonably long, fallback to mp3.
+    if not ext or len(ext) > 5:
         ext = 'mp3'
 
     # 2. Create a SHA256 hash of the URL for a unique filename
@@ -76,7 +76,11 @@ def process_download_job(message):
         episode_url = body.get('episode_url')
         if not episode_url:
             raise KeyError("'episode_url' is a required field.")
-            
+        
+        podcast_id = body.get('podcast_id')
+        if not podcast_id:
+            raise KeyError("'podcast_id' is a required field for the S3 key.")
+
         # Language is optional and will default to 'unknown'.
         language = body.get('language', 'unknown')
 
@@ -87,10 +91,15 @@ def process_download_job(message):
 
     # 1. Download and Stream audio file directly to S3
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-        }
-        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers) as response:
+        # Use a specific user-agent unless it's a hearthis.at URL to avoid throttling
+        if 'hearthis.at' in episode_url:
+            headers = {}
+        else:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
+
+        with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
             response.raise_for_status() # Check for bad status codes (4xx or 5xx)
 
             # 2. Construct S3 path and upload via stream

@@ -355,10 +355,10 @@ def process_feed_job(message):
                     sqs_api_batch.append({
                         "Id": str(time.time_ns()),
                         "MessageBody": json.dumps({
-                            "podcast_id": podcast_id, # This was the missing field
                             "episode_url": episode_url,
                             "podcast_rss_url": rss_url,
-                            "language": language
+                            "language": language,
+                            "podcast_id": podcast_id
                         })
                     })
                     if len(sqs_api_batch) == SQS_BATCH_SIZE:
@@ -386,16 +386,16 @@ def process_feed_job(message):
             # --- Standard Logic for smaller feeds ---
             sqs_batch = []
             for episode_url in new_episodes_to_enqueue:
-                message_to_send = {
+                message = {
                     "Id": str(time.time_ns()),
                     "MessageBody": json.dumps({
-                        "podcast_id": podcast_id, # This was the missing field
                         "episode_url": episode_url,
                         "podcast_rss_url": rss_url,
-                        "language": language
+                        "language": language,
+                        "podcast_id": podcast_id
                     })
                 }
-                sqs_batch.append(message_to_send)
+                sqs_batch.append(message)
                 if len(sqs_batch) == SQS_BATCH_SIZE:
                     sent_count = send_batch_to_sqs(sqs_batch)
                     episodes_enqueued += sent_count
