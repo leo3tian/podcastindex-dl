@@ -345,14 +345,21 @@ def process_feed_job(message):
         if total_to_enqueue > STAGGER_THRESHOLD:
             logging.warning(f"Large feed detected ({total_to_enqueue} new episodes). Staggering enqueue to SQS.")
             current_delay = 0
+            # The outer loop determines which large chunk of jobs gets a specific delay
             for i in range(0, total_to_enqueue, STAGGER_BATCH_SIZE):
                 staggered_chunk = new_episodes_to_enqueue[i:i + STAGGER_BATCH_SIZE]
                 
+                # The inner loop respects the SQS API limit of 10
                 sqs_api_batch = []
                 for episode_url in staggered_chunk:
                     sqs_api_batch.append({
                         "Id": str(time.time_ns()),
-                        "MessageBody": json.dumps({"episode_url": episode_url, "podcast_rss_url": rss_url, "language": language})
+                        "MessageBody": json.dumps({
+                            "podcast_id": podcast_id, # This was the missing field
+                            "episode_url": episode_url,
+                            "podcast_rss_url": rss_url,
+                            "language": language
+                        })
                     })
                     if len(sqs_api_batch) == SQS_BATCH_SIZE:
                         sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
