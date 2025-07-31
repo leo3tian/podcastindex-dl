@@ -8,7 +8,6 @@ import time
 import re
 from urllib.parse import urlparse
 import hashlib
-import signal
 
 
 # --- Configuration ---
@@ -33,17 +32,10 @@ sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 dynamodb_table = boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE_NAME)
 
-# --- Custom Exception & Handler for Download Timeouts ---
+# --- Custom Exception for Download Timeouts ---
 class DownloadTimeoutError(Exception):
     """Custom exception raised when a download operation takes too long."""
     pass
-
-def _timeout_handler(signum, frame):
-    """Signal handler that raises our custom exception."""
-    raise DownloadTimeoutError()
-
-# Register the signal handler for the alarm signal (SIGALRM)
-signal.signal(signal.SIGALRM, _timeout_handler)
 
 def sanitize_filename(url):
     """Creates a safe filename from a URL, preserving the extension."""
@@ -110,50 +102,44 @@ def process_download_job(message):
         # Language is optional and will default to 'unknown'.
         language = body.get('language', 'unknown')
 
-        # --- Download and S3 Upload with a 2-minute timeout ---
+        # --- Download and S3 Upload with a manual timeout ---
         try:
-            # Set an alarm for the entire operation. If it takes longer than 120
-            # seconds, the _timeout_handler will raise DownloadTimeoutError.
-            signal.alarm(MAX_DOWNLOAD_TIME)
+            # Use a specific user-agent unless it's a hearthis.at URL to avoid throttling
+            if 'hearthis.at' in episode_url:
+                headers = {}
+            else:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+                }
 
-            # 1. Download and Stream audio file directly to S3
-            try:
-                # Use a specific user-agent unless it's a hearthis.at URL to avoid throttling
-                if 'hearthis.at' in episode_url:
-                    headers = {}
-                else:
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-                    }
+            start_time = time.time()
+            with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
+                response.raise_for_status()
 
-                with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
-                    response.raise_for_status() # Check for bad status codes (4xx or 5xx)
+                s3_key = get_s3_key(podcast_id, language, episode_url)
+                logging.info(f"Starting S3 upload stream for {episode_url} to s3://{S3_BUCKET_NAME}/{s3_key}")
 
-                    # 2. Construct S3 path and upload via stream
-                    s3_key = get_s3_key(podcast_id, language, episode_url)
+                # This generator function wraps the download stream. It yields chunks
+                # of the file while also checking for a timeout.
+                def timeout_aware_stream(stream):
+                    for chunk in stream:
+                        if time.time() - start_time > MAX_DOWNLOAD_TIME:
+                            raise DownloadTimeoutError(f"Download exceeded {MAX_DOWNLOAD_TIME} seconds.")
+                        yield chunk
 
-                    try:
-                        # upload_fileobj streams the response body directly to S3, handling multipart uploads for large files automatically.
-                        # This keeps memory usage low and constant.
-                        logging.info(f"Starting S3 upload stream for {episode_url} to s3://{S3_BUCKET_NAME}/{s3_key}")
-                        s3_client.upload_fileobj(response.raw, S3_BUCKET_NAME, s3_key)
-                        logging.info(f"Finished S3 upload stream for {episode_url}")
-                    except Exception as e:
-                        logging.error(f"Failed during S3 upload stream for {episode_url}: {e}")
-                        return False # Let the job be retried
+                # We pass our timeout-aware generator to the S3 client.
+                # Boto3 will pull from it, triggering our timeout check on each chunk.
+                s3_client.upload_fileobj(
+                    timeout_aware_stream(response.iter_content(chunk_size=8192)),
+                    S3_BUCKET_NAME,
+                    s3_key
+                )
+                logging.info(f"Finished S3 upload stream for {episode_url}")
 
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"Failed to start download stream for {episode_url}: {e}")
-                # Do not delete message, let it be retried or sent to DLQ
-                return False
-
-        except DownloadTimeoutError:
-            logging.warning(f"Skipping download for {episode_url}: operation took longer than {MAX_DOWNLOAD_TIME} seconds.")
+        except (requests.exceptions.RequestException, DownloadTimeoutError) as e:
+            # Catching both network errors from requests and our custom timeout
+            logging.warning(f"Skipping download for {episode_url}: {e}")
             return False # Let SQS handle retries/DLQ
-        finally:
-            # Crucial: Always disable the alarm when this block is exited,
-            # whether by success, timeout, or another exception.
-            signal.alarm(0)
 
     except (KeyError, json.JSONDecodeError) as e:
         logging.error(f"Invalid message format, deleting from queue: {message['Body']} - {e}")
