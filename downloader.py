@@ -70,9 +70,16 @@ def process_download_job(message):
     receipt_handle = message['ReceiptHandle']
     try:
         body = json.loads(message['Body'])
-        episode_url = body['episode_url']
-        podcast_id = body['podcast_id']
+        
+        # --- Hardened Parsing Logic ---
+        # The only required field is episode_url.
+        episode_url = body.get('episode_url')
+        if not episode_url:
+            raise KeyError("'episode_url' is a required field.")
+            
+        # Language is optional and will default to 'unknown'.
         language = body.get('language', 'unknown')
+
     except (KeyError, json.JSONDecodeError) as e:
         logging.error(f"Invalid message format, deleting from queue: {message['Body']} - {e}")
         sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
