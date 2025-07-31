@@ -190,7 +190,11 @@ def get_existing_episodes(episode_urls):
     # Handle DynamoDB's batch limit of 100
     for i in range(0, len(episode_urls), MAX_DYNAMODB_BATCH_GET):
         batch_urls = episode_urls[i:i + MAX_DYNAMODB_BATCH_GET]
-        keys = [{"episode_url": url} for url in batch_urls]
+        
+        # Ensure URLs are unique within the batch to prevent DynamoDB validation errors
+        unique_batch_urls = list(set(batch_urls))
+        keys = [{"episode_url": url} for url in unique_batch_urls]
+
         try:
             response = dynamodb.batch_get_item(
                 RequestItems={DYNAMODB_TABLE_NAME: {"Keys": keys}}
@@ -201,7 +205,7 @@ def get_existing_episodes(episode_urls):
             logging.error(f"Error checking DynamoDB for existing episodes: {e}")
             # In case of error, conservatively assume all might exist to avoid re-queueing
             # A more robust solution could implement retries
-            return set(batch_urls)
+            return set(unique_batch_urls)
     return existing_urls
 
 
