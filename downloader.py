@@ -8,7 +8,7 @@ import time
 import re
 from urllib.parse import urlparse
 import hashlib
-
+import multiprocessing
 
 # --- Configuration ---
 DOWNLOAD_SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/PodcastIndexQueue")
@@ -18,7 +18,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
 # --- Timeouts ---
 REQUEST_TIMEOUT = (5, 60)  # 5s connect, 60s read (generous for large audio files)
-MAX_DOWNLOAD_TIME = 120  # 2 minutes
+MAX_DOWNLOAD_TIME = 45  # 45 seconds total for a download job to complete
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -31,11 +31,6 @@ logging.basicConfig(
 sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 dynamodb_table = boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE_NAME)
-
-# --- Custom Exception for Download Timeouts ---
-class DownloadTimeoutError(Exception):
-    """Custom exception raised when a download operation takes too long."""
-    pass
 
 def sanitize_filename(url):
     """Creates a safe filename from a URL, preserving the extension."""
@@ -79,30 +74,22 @@ def get_s3_key(podcast_id, language, episode_url):
     return f"raw_audio/{language}/{podcast_id}/{short_hash}.{ext}"
 
 
-def process_download_job(message):
+def _execute_download_job(episode_url, podcast_id, language, receipt_handle, aws_region, download_sqs_url, dynamodb_table_name, s3_bucket_name, request_timeout):
     """
-    Processes a single download job from the SQS queue.
-    Downloads the file, uploads to S3, and updates DynamoDB.
-    Returns True if a new episode was successfully downloaded, False otherwise.
+    This function runs in a separate process. It contains the core logic for
+    downloading a file, uploading it to S3, and updating DynamoDB.
+    It communicates its outcome via sys.exit() codes.
+    - 0: Success
+    - 1: Duplicate job, successfully handled
+    - 2: Recoverable error, job should be retried (message not deleted)
     """
-    receipt_handle = message['ReceiptHandle']
+    # Re-initialize AWS clients in the new process
+    sqs_client = boto3.client("sqs", region_name=aws_region)
+    s3_client = boto3.client("s3", region_name=aws_region)
+    dynamodb_table = boto3.resource("dynamodb", region_name=aws_region).Table(dynamodb_table_name)
+    
     try:
-        body = json.loads(message['Body'])
-        
-        # --- Hardened Parsing Logic ---
-        # The only required field is episode_url.
-        episode_url = body.get('episode_url')
-        if not episode_url:
-            raise KeyError("'episode_url' is a required field.")
-        
-        podcast_id = body.get('podcast_id')
-        if not podcast_id:
-            raise KeyError("'podcast_id' is a required field for the S3 key.")
-
-        # Language is optional and will default to 'unknown'.
-        language = body.get('language', 'unknown')
-
-        # --- Download and S3 Upload with a manual timeout ---
+        # 1. Download and Stream audio file directly to S3
         try:
             # Use a specific user-agent unless it's a hearthis.at URL to avoid throttling
             if 'hearthis.at' in episode_url:
@@ -112,69 +99,106 @@ def process_download_job(message):
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
                 }
 
-            start_time = time.time()
-            with requests.get(episode_url, timeout=REQUEST_TIMEOUT, stream=True, headers=headers, allow_redirects=True) as response:
+            with requests.get(episode_url, timeout=request_timeout, stream=True, headers=headers, allow_redirects=True) as response:
                 response.raise_for_status()
 
+                # 2. Construct S3 path and upload via stream
                 s3_key = get_s3_key(podcast_id, language, episode_url)
-                logging.info(f"Starting S3 upload stream for {episode_url} to s3://{S3_BUCKET_NAME}/{s3_key}")
 
-                # This generator function wraps the download stream. It yields chunks
-                # of the file while also checking for a timeout.
-                def timeout_aware_stream(stream):
-                    for chunk in stream:
-                        if time.time() - start_time > MAX_DOWNLOAD_TIME:
-                            raise DownloadTimeoutError(f"Download exceeded {MAX_DOWNLOAD_TIME} seconds.")
-                        yield chunk
+                try:
+                    logging.info(f"Starting S3 upload stream for {episode_url} to s3://{s3_bucket_name}/{s3_key}")
+                    s3_client.upload_fileobj(response.raw, s3_bucket_name, s3_key)
+                    logging.info(f"Finished S3 upload stream for {episode_url}")
+                except Exception as e:
+                    logging.error(f"Failed during S3 upload stream for {episode_url}: {e}")
+                    sys.exit(2)
 
-                # We pass our timeout-aware generator to the S3 client.
-                # Boto3 will pull from it, triggering our timeout check on each chunk.
-                s3_client.upload_fileobj(
-                    timeout_aware_stream(response.iter_content(chunk_size=8192)),
-                    S3_BUCKET_NAME,
-                    s3_key
-                )
-                logging.info(f"Finished S3 upload stream for {episode_url}")
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Failed to start download stream for {episode_url}: {e}")
+            sys.exit(2)
 
-        except (requests.exceptions.RequestException, DownloadTimeoutError) as e:
-            # Catching both network errors from requests and our custom timeout
-            logging.warning(f"Skipping download for {episode_url}: {e}")
-            return False # Let SQS handle retries/DLQ
+        # 3. Perform conditional write to DynamoDB
+        try:
+            dynamodb_table.put_item(
+                Item={'episode_url': episode_url},
+                ConditionExpression='attribute_not_exists(episode_url)'
+            )
+        except dynamodb_table.meta.client.exceptions.ConditionalCheckFailedException:
+            logging.warning(f"Race condition: {episode_url} already processed. Deleting duplicate job.")
+            try:
+                sqs_client.delete_message(QueueUrl=download_sqs_url, ReceiptHandle=receipt_handle)
+                sys.exit(1)
+            except Exception as e:
+                logging.error(f"Failed to delete duplicate SQS message for {episode_url}: {e}")
+                sys.exit(2)
+                
+        except Exception as e:
+            logging.error(f"Failed to write to DynamoDB for {episode_url}: {e}")
+            sys.exit(2)
+
+        # 4. If all successful, delete the message from SQS
+        try:
+            sqs_client.delete_message(QueueUrl=download_sqs_url, ReceiptHandle=receipt_handle)
+            logging.info(f"Successfully completed download for {episode_url}.")
+        except Exception as e:
+            logging.error(f"Failed to delete SQS message for {episode_url}: {e}")
+            sys.exit(2)
+        
+        sys.exit(0)
+
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in the child process for {episode_url}: {e}", exc_info=True)
+        sys.exit(2)
+
+
+def process_download_job(message):
+    """
+    Processes a single download job from the SQS queue.
+    This function now acts as a manager, spawning a separate process to do
+    the actual work and enforcing a 2-minute timeout.
+    Returns True if a new episode was successfully downloaded, False otherwise.
+    """
+    receipt_handle = message['ReceiptHandle']
+    try:
+        body = json.loads(message['Body'])
+        
+        episode_url = body.get('episode_url')
+        if not episode_url:
+            raise KeyError("'episode_url' is a required field.")
+        
+        podcast_id = body.get('podcast_id')
+        if not podcast_id:
+            raise KeyError("'podcast_id' is a required field for the S3 key.")
+
+        language = body.get('language', 'unknown')
 
     except (KeyError, json.JSONDecodeError) as e:
         logging.error(f"Invalid message format, deleting from queue: {message['Body']} - {e}")
         sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
         return False
 
-    # 3. Perform conditional write to DynamoDB (The Guarantee)
-    is_duplicate = False
-    try:
-        dynamodb_table.put_item(
-            Item={'episode_url': episode_url},
-            ConditionExpression='attribute_not_exists(episode_url)'
-        )
-    except dynamodb_table.meta.client.exceptions.ConditionalCheckFailedException:
-        # This is not an error. It's the expected outcome for a duplicate job.
-        logging.warning(f"Race condition detected: {episode_url} was already processed. Discarding duplicate job.")
-        is_duplicate = True
-        # The job was a duplicate, but we've confirmed the work is done, so we can delete the message.
-    except Exception as e:
-        logging.error(f"Failed to write to DynamoDB for {episode_url}: {e}")
-        # This is a more serious error (e.g., throttling, permissions).
-        # Let the message be retried.
+    # Spawn a new process to handle the download
+    process_args = (
+        episode_url, podcast_id, language, receipt_handle,
+        AWS_REGION, DOWNLOAD_SQS_QUEUE_URL, DYNAMODB_TABLE_NAME, S3_BUCKET_NAME, REQUEST_TIMEOUT
+    )
+    process = multiprocessing.Process(target=_execute_download_job, args=process_args)
+    process.start()
+    process.join(timeout=45)
+
+    if process.is_alive():
+        logging.warning(f"DOWNLOAD TIMEOUT for {episode_url}. Terminating process.")
+        process.terminate()
+        process.join()
         return False
 
-    # 4. If all successful, delete the message from SQS
-    try:
-        sqs_client.delete_message(QueueUrl=DOWNLOAD_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-        logging.info(f"Successfully completed download for {episode_url}.")
-    except Exception as e:
-        logging.error(f"Failed to delete SQS message for {episode_url}: {e}")
-        # This is not ideal, as the job might be re-processed, but the DynamoDB check will prevent re-download.
+    if process.exitcode == 0:
+        return True
+    elif process.exitcode == 1:
         return False
-
-    # Return True only if it was a new download, not a duplicate.
-    return not is_duplicate
+    else:
+        logging.error(f"Download worker for {episode_url} failed with exit code {process.exitcode}. Will be retried.")
+        return False
 
 def main():
     """
