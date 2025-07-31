@@ -40,16 +40,27 @@ def sanitize_filename(url):
     # Ensure it's not too long
     return safe_path[-128:]
 
+
 def get_s3_key(podcast_id, language, episode_url):
     """
     Creates a unique, collision-proof S3 key.
     Path: raw_audio/{language}/{podcast_id}/{sha256_hash}.{extension}
     """
-    # 1. Get the file extension
+    # 1. Get the file extension from the URL path
     path = urlparse(episode_url).path
-    # Fallback to .mp3 if no extension is found
-    # If there's no extension, or it's unreasonably long, fallback to mp3.
-    if not ext or len(ext) > 5:
+
+    # Use rsplit to robustly get the extension. It handles cases with no dot.
+    parts = path.rsplit('.', 1)
+
+    ext = ''
+    if len(parts) == 2:
+        # If a dot was found, the extension is the second part
+        ext = parts[1]
+
+    # If the extension is missing, invalid, or just part of a long path segment,
+    # default to 'mp3'. A simple length check is a decent heuristic.
+    # Also check for slashes to avoid using a path segment as an extension.
+    if not ext or len(ext) > 5 or '/' in ext:
         ext = 'mp3'
 
     # 2. Create a SHA256 hash of the URL for a unique filename
