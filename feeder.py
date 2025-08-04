@@ -61,15 +61,10 @@ def send_batch_to_sqs(sqs_batch):
         
         successful_ids = []
         if "Successful" in response:
-            # The podcast_id was used as the message Id, so we can cast back to int if needed,
-            # but boto3 returns it as a string.
             successful_ids = [msg['Id'] for msg in response['Successful']]
 
         if "Failed" in response and response["Failed"]:
             logging.error(f"Failed to send {len(response['Failed'])} feed jobs.")
-            # Optionally log more details about failures
-            # for failed_msg in response["Failed"]:
-            #     logging.error(f"  - Failed Msg ID: {failed_msg['Id']}, Reason: {failed_msg['Message']}")
 
         return [int(id_str) for id_str in successful_ids]
     except Exception as e:

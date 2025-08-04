@@ -23,6 +23,13 @@ DOWNLOAD_SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "https://sqs.us-west-1.amazo
 DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "PodcastIndexJobs")
 AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
+# --- Cloudflare Configuration (NEW) ---
+# Replace with your actual Cloudflare details
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
+CF_QUEUE_ID = os.getenv("CF_QUEUE_ID")
+CF_API_TOKEN = os.getenv("CF_API_TOKEN")
+
+
 # --- Tuning Levers ---
 DB_UPDATE_BATCH_SIZE = int(os.getenv("DB_UPDATE_BATCH_SIZE", 100))
 # The threshold at which we start staggering SQS messages
@@ -39,7 +46,7 @@ PG_USER = os.getenv("PG_USER")
 PG_PASSWORD = os.getenv("PG_PASSWORD")
 
 # --- Constants ---
-SQS_BATCH_SIZE = 10  # For sending to the download queue
+SQS_BATCH_SIZE = 100  # For sending to the download queue (Max for Cloudflare is 100)
 MAX_DYNAMODB_BATCH_GET = 100 # DynamoDB limit
 # This will match common private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
 PRIVATE_IP_REGEX = re.compile(
@@ -209,32 +216,41 @@ def get_existing_episodes(episode_urls):
     return existing_urls
 
 
-def send_batch_to_sqs(sqs_batch, delay_seconds=0):
-    """Sends a batch of messages to the final download SQS queue, with an optional delay."""
-    if not sqs_batch:
+def send_batch_to_cf_queue(cf_batch):
+    """Sends a batch of messages to the Cloudflare download queue."""
+    if not cf_batch:
         return 0
+        
+    if not all([CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN]):
+        logging.error("Cloudflare configuration (CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN) is missing.")
+        return 0
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/queues/{CF_QUEUE_ID}/messages"
     
-    # Respect the SQS maximum delay of 900 seconds (15 minutes)
-    effective_delay = min(delay_seconds, 900)
-    if delay_seconds > 900:
-        logging.warning(f"Calculated delay of {delay_seconds}s exceeds SQS limit. Capping at 900s.")
-
-    # Add the delay to each message if specified
-    for message in sqs_batch:
-        message['DelaySeconds'] = effective_delay
-
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    # Cloudflare expects a list of objects, each with a 'body'
+    messages_payload = [{"body": json.dumps(msg)} for msg in cf_batch]
+    
     try:
-        response = sqs_client.send_message_batch(
-            QueueUrl=DOWNLOAD_SQS_QUEUE_URL, Entries=sqs_batch
-        )
-        if "Failed" in response and response["Failed"]:
-            # Log the specific failure reasons from SQS for better debugging
-            for failed_msg in response["Failed"]:
-                logging.error(f"SQS send failed for Msg ID {failed_msg['Id']}: Code={failed_msg['Code']}, Message={failed_msg['Message']}")
-        return len(response.get("Successful", []))
-    except Exception as e:
-        # Log the boto3/botocore exception, which is much more informative
-        logging.error(f"Error sending batch to SQS (delay: {effective_delay}s): {e}")
+        response = requests.post(url, json={"messages": messages_payload}, headers=headers, timeout=10)
+        response.raise_for_status() # Raise an exception for bad status codes
+        
+        result = response.json()
+        success_count = result.get('success_count', 0)
+        
+        logging.info(f"Successfully sent {success_count} jobs to Cloudflare Queue.")
+        if result.get('failure_count', 0) > 0:
+            logging.error(f"Failed to send {result['failure_count']} jobs to Cloudflare Queue.")
+            # In a production system, you would add more detailed error handling here.
+            
+        return success_count
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error sending batch to Cloudflare Queue: {e}")
         return 0
 
 
@@ -336,91 +352,30 @@ def process_feed_job(message):
 
         if not new_episodes_to_enqueue:
             logging.info(f"No new episodes to enqueue for {rss_url}.")
-            mark_feed_as_complete(podcast_id) # Mark as complete even if no new episodes
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
-        # --- Enqueueing with All-or-Nothing Logic ---
-        total_to_enqueue = len(new_episodes_to_enqueue)
+        # Use a simple list for the batch now, not SQS format
+        cf_batch = []
         episodes_enqueued = 0
-        all_batches_successful = True
-        
-        # --- Staggering Logic ---
-        if total_to_enqueue > STAGGER_THRESHOLD:
-            logging.warning(f"Large feed detected ({total_to_enqueue} new episodes). Staggering enqueue to SQS.")
-            current_delay = 0
-            # The outer loop determines which large chunk of jobs gets a specific delay
-            for i in range(0, total_to_enqueue, STAGGER_BATCH_SIZE):
-                staggered_chunk = new_episodes_to_enqueue[i:i + STAGGER_BATCH_SIZE]
-                
-                # The inner loop respects the SQS API limit of 10
-                sqs_api_batch = []
-                for episode_url in staggered_chunk:
-                    sqs_api_batch.append({
-                        "Id": str(time.time_ns()),
-                        "MessageBody": json.dumps({
-                            "episode_url": episode_url,
-                            "podcast_rss_url": rss_url,
-                            "language": language,
-                            "podcast_id": podcast_id
-                        })
-                    })
-                    if len(sqs_api_batch) == SQS_BATCH_SIZE:
-                        sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
-                        episodes_enqueued += sent_count
-                        if sent_count < len(sqs_api_batch):
-                            all_batches_successful = False
-                            break
-                        sqs_api_batch.clear()
-                
-                if not all_batches_successful:
-                    break
-                
-                if sqs_api_batch:
-                    sent_count = send_batch_to_sqs(sqs_api_batch, delay_seconds=current_delay)
-                    episodes_enqueued += sent_count
-                    if sent_count < len(sqs_api_batch):
-                        all_batches_successful = False
-                
-                if not all_batches_successful:
-                    break
-                
-                current_delay += STAGGER_DELAY_SECONDS
-        else:
-            # --- Standard Logic for smaller feeds ---
-            sqs_batch = []
-            for episode_url in new_episodes_to_enqueue:
-                message = {
-                    "Id": str(time.time_ns()),
-                    "MessageBody": json.dumps({
-                        "episode_url": episode_url,
-                        "podcast_rss_url": rss_url,
-                        "language": language,
-                        "podcast_id": podcast_id
-                    })
-                }
-                sqs_batch.append(message)
-                if len(sqs_batch) == SQS_BATCH_SIZE:
-                    sent_count = send_batch_to_sqs(sqs_batch)
-                    episodes_enqueued += sent_count
-                    if sent_count < len(sqs_batch):
-                        all_batches_successful = False
-                        break
-                    sqs_batch.clear()
-            
-            if all_batches_successful and sqs_batch:
-                sent_count = send_batch_to_sqs(sqs_batch)
-                episodes_enqueued += sent_count
-                if sent_count < len(sqs_batch):
-                    all_batches_successful = False
+        for episode_url in new_episodes_to_enqueue:
+            # The message is now just the simple JSON object
+            message_body = {
+                "episode_url": episode_url,
+                "podcast_rss_url": rss_url,
+                "language": language,
+                "podcast_id": podcast_id
+            }
+            cf_batch.append(message_body)
+            if len(cf_batch) == SQS_BATCH_SIZE:
+                episodes_enqueued += send_batch_to_cf_queue(cf_batch)
+                cf_batch.clear()
 
-        if all_batches_successful:
-            logging.info(f"Successfully enqueued all {episodes_enqueued} new episodes for {rss_url}.")
-            mark_feed_as_complete(podcast_id)
-            sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-        else:
-            logging.error(f"Failed to enqueue all episodes for {rss_url}. Enqueued {episodes_enqueued}/{total_to_enqueue}. Will be retried.")
-            # DO NOT mark as complete. DO NOT delete SQS message. Let the job time out.
+        if cf_batch:
+            episodes_enqueued += send_batch_to_cf_queue(cf_batch)
+
+        logging.info(f"Successfully enqueued {episodes_enqueued} new episodes for {rss_url}.")
+        sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
 
     except Exception as e:
         logging.error(f"Failed to process feed {rss_url}: {e}", exc_info=True)
@@ -433,8 +388,8 @@ def main():
     """
     Main worker loop to continuously poll for and process feed jobs.
     """
-    if not all([FEEDS_SQS_QUEUE_URL, DOWNLOAD_SQS_QUEUE_URL, DYNAMODB_TABLE_NAME, PG_HOST]):
-        logging.error("Missing required environment variables.")
+    if not FEEDS_SQS_QUEUE_URL or not DYNAMODB_TABLE_NAME:
+        logging.error("Missing required AWS environment variables.")
         sys.exit(1)
 
     logging.info("--- Starting Worker Script ---")

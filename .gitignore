@@ -1,0 +1,6 @@
+.env
+/samples/
+/cf-downloader/node_modules/
+/.wrangler/
+/cf-downloader/
+/wrangler.toml
