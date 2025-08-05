@@ -232,10 +232,14 @@ def send_batch_to_cf_queue(cf_batch):
         "Content-Type": "application/json"
     }
     
-    # Cloudflare expects a list of objects, each with a 'body'.
-    # The 'body' itself should be our unserialized dictionary/JSON object.
-    # The 'requests' library will handle the final JSON serialization.
-    messages_payload = [{"body": msg} for msg in cf_batch]
+    # Per Cloudflare API docs, when sending from the REST API, the message body
+    # must be a string, and we must specify the content_type.
+    messages_payload = []
+    for msg in cf_batch:
+        messages_payload.append({
+            "body": json.dumps(msg),
+            "content_type": "json"
+        })
     
     try:
         response = requests.post(url, json={"messages": messages_payload}, headers=headers, timeout=10)
