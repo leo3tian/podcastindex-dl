@@ -238,11 +238,10 @@ def send_batch_to_cf_queue(cf_batch):
         logging.error("Cloudflare client not initialized. Cannot send messages.")
         return 0
 
-    # The SDK expects a list of message objects. Each object needs a 'body'
-    # which we'll create by JSON-dumping our message dict, and we'll set the
-    # content_type to 'json' to be explicit.
+    # The SDK will automatically JSON-serialize the dictionary in 'body'
+    # when the content_type is 'json'. Do NOT pre-serialize with json.dumps().
     messages_to_send = [
-        {"body": json.dumps(msg), "content_type": "json"} for msg in cf_batch
+        {"body": msg, "content_type": "json"} for msg in cf_batch
     ]
 
     try:
@@ -274,7 +273,8 @@ def send_batch_to_cf_queue(cf_batch):
         logging.error(f"Error sending batch to Cloudflare Queue due to API error: {e.message}")
         if e.body and 'errors' in e.body:
              for error in e.body['errors']:
-                logging.error(f"  - API Error Detail: {error['code']}: {error['message']}")
+                # Log the entire error object for better debugging, as format can vary.
+                logging.error(f"  - API Error Detail: {error}")
         return 0
     except Exception as e:
         # Handle other unexpected errors (e.g., network issues)

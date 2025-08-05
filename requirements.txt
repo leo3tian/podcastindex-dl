@@ -1,6 +1,0 @@
-feedparser
-boto3
-requests
-urllib3
-psycopg2-binary
-cloudflare 
