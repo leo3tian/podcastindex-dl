@@ -232,17 +232,20 @@ def send_batch_to_cf_queue(cf_batch):
         "Content-Type": "application/json"
     }
     
-    # Per Cloudflare API docs, when sending from the REST API, the message body
-    # must be a string, and we must specify the content_type.
+    # Per Cloudflare API docs, the top-level key must be 'messages'.
+    # Each message must have a 'body' (as a string) and a 'content_type'.
     messages_payload = []
     for msg in cf_batch:
         messages_payload.append({
             "body": json.dumps(msg),
-            "content_type": "json"
+            "contentType": "json" # Note: API docs show contentType, not content_type
         })
     
+    # The final payload is an object with a single "messages" key
+    final_payload = {"messages": messages_payload}
+
     try:
-        response = requests.post(url, json={"messages": messages_payload}, headers=headers, timeout=10)
+        response = requests.post(url, json=final_payload, headers=headers, timeout=10)
         response.raise_for_status() # Raise an exception for bad status codes
         
         result = response.json()
