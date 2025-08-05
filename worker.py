@@ -426,6 +426,7 @@ def main():
 
     try:
         while True:
+            time.sleep(10)
             try:
                 response = sqs_client.receive_message(
                     QueueUrl=FEEDS_SQS_QUEUE_URL,
