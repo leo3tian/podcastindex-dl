@@ -435,7 +435,6 @@ def main():
                 )
                 if "Messages" in response:
                     for message in response["Messages"]:
-                        time.sleep(10) 
                         process_feed_job(message)
                 else:
                     logging.info("Queue is empty, waiting for new messages...")
