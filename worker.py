@@ -426,7 +426,6 @@ def main():
 
     try:
         while True:
-            time.sleep(10)
             try:
                 response = sqs_client.receive_message(
                     QueueUrl=FEEDS_SQS_QUEUE_URL,
@@ -436,6 +435,7 @@ def main():
                 )
                 if "Messages" in response:
                     for message in response["Messages"]:
+                        time.sleep(10) 
                         process_feed_job(message)
                 else:
                     logging.info("Queue is empty, waiting for new messages...")
