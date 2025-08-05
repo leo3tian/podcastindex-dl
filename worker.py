@@ -9,6 +9,7 @@ import requests
 import re
 import urllib3
 import psycopg2
+from cloudflare import Cloudflare, APIError
 
 # Suppress only the InsecureRequestWarning from urllib3, as we are intentionally
 # disabling SSL verification for some feeds.
@@ -72,6 +73,18 @@ logging.basicConfig(
 sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 dynamodb_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+
+# --- Cloudflare Client (NEW) ---
+# Initialize the client if all configuration variables are present.
+cf_client = None
+if all([CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN]):
+    try:
+        cf_client = Cloudflare(api_token=CF_API_TOKEN)
+    except Exception as e:
+        logging.error(f"Failed to initialize Cloudflare client: {e}")
+else:
+    logging.warning("Cloudflare configuration is incomplete. CF sending will be disabled.")
+
 
 # --- Global State ---
 # Workers will batch DB updates for efficiency. These lists hold pending updates.
@@ -217,49 +230,55 @@ def get_existing_episodes(episode_urls):
 
 
 def send_batch_to_cf_queue(cf_batch):
-    """Sends a batch of messages to the Cloudflare download queue."""
+    """Sends a batch of messages to the Cloudflare download queue using the Python SDK."""
     if not cf_batch:
         return 0
-        
-    if not all([CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN]):
-        logging.error("Cloudflare configuration (CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN) is missing.")
+
+    if not cf_client:
+        logging.error("Cloudflare client not initialized. Cannot send messages.")
         return 0
 
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/queues/{CF_QUEUE_ID}/messages"
-    
-    headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    # Per Cloudflare API docs, the top-level key must be 'messages'.
-    # Each message must have a 'body' (as a string) and a 'content_type'.
-    messages_payload = []
-    for msg in cf_batch:
-        messages_payload.append({
-            "body": json.dumps(msg),
-            "contentType": "json" # Note: API docs show contentType, not content_type
-        })
-    
-    # The final payload is an object with a single "messages" key
-    final_payload = {"messages": messages_payload}
+    # The SDK expects a list of message objects. Each object needs a 'body'
+    # which we'll create by JSON-dumping our message dict, and we'll set the
+    # content_type to 'json' to be explicit.
+    messages_to_send = [
+        {"body": json.dumps(msg), "content_type": "json"} for msg in cf_batch
+    ]
 
     try:
-        response = requests.post(url, json=final_payload, headers=headers, timeout=10)
-        response.raise_for_status() # Raise an exception for bad status codes
+        logging.info(f"Sending a batch of {len(messages_to_send)} jobs to Cloudflare Queue.")
         
-        result = response.json()
-        success_count = result.get('success_count', 0)
+        # Use the SDK's bulk_push method
+        response = cf_client.queues.messages.bulk_push(
+            queue_id=CF_QUEUE_ID,
+            account_id=CF_ACCOUNT_ID,
+            messages=messages_to_send,
+        )
+
+        # The 'messages' attribute in the response contains the IDs of successfully pushed messages
+        success_count = len(response.messages) if response.messages else 0
         
         logging.info(f"Successfully sent {success_count} jobs to Cloudflare Queue.")
-        if result.get('failure_count', 0) > 0:
-            logging.error(f"Failed to send {result['failure_count']} jobs to Cloudflare Queue.")
-            # In a production system, you would add more detailed error handling here.
-            
-        return success_count
+
+        # Check for any errors reported by the API for individual messages
+        if response.errors:
+            logging.error(f"Failed to send {len(response.errors)} individual messages to Cloudflare Queue.")
+            for error in response.errors:
+                 # The 'error' object has 'code' and 'message' attributes
+                 logging.error(f"  - Code: {error.code}, Message: {error.message}")
         
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error sending batch to Cloudflare Queue: {e}")
+        return success_count
+
+    except APIError as e:
+        # Handle API-level errors (e.g., authentication, permissions)
+        logging.error(f"Error sending batch to Cloudflare Queue due to API error: {e.message}")
+        if e.body and 'errors' in e.body:
+             for error in e.body['errors']:
+                logging.error(f"  - API Error Detail: {error['code']}: {error['message']}")
+        return 0
+    except Exception as e:
+        # Handle other unexpected errors (e.g., network issues)
+        logging.error(f"An unexpected error occurred when sending to Cloudflare Queue: {e}", exc_info=True)
         return 0
 
 
