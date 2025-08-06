@@ -56,6 +56,43 @@ PRIVATE_IP_REGEX = re.compile(
     r"^(?:192\.168)\.(?:[0-9]{1,3}\.){1}[0-9]{1,3}$"
 )
 
+# --- Content Filtering ---
+# These settings control the heuristic scoring to filter out non-dialogue content.
+# A score is calculated for each feed. If it's below the threshold, it's skipped.
+CATEGORY_SCORES = {
+    # Positive signals (dialogue-focused)
+    'news': 20, 'commentary': 20, 'politics': 15, 'history': 15,
+    'science': 15, 'technology': 15, 'business': 15, 'education': 10,
+    'courses': 10, 'sports': 10, 'society & culture': 10, 'comedy': 10,
+    'comedy interview': 15, 'crime': 10, 'arts': 5,
+    
+    # Negative signals (likely non-dialogue)
+    'leisure': -5, 'spirituality': -10, 'religion & spirituality': -5,
+    'music': -30
+}
+
+POSITIVE_KEYWORDS = {
+    'interview': 15, 'discussion': 15, 'conversation': 10, 'commentary': 10,
+    'panel': 10, 'explains': 10, 'breaks down': 10, 'analyzes': 10,
+    'hosted by': 5, 'episode': 2
+}
+
+NEGATIVE_KEYWORDS = {
+    # Music formats
+    'dj set': -25, 'dj mix': -25, 'tracklist': -20, 'remix': -15,
+    'live set': -15, 'mixtape': -15, 'white noise': -15,
+    # Music genres
+    'techno': -20, 'house music': -20, 'trance': -20, 'edm': -20,
+    'ambient': -15, 'instrumental': -15,
+    # Other non-dialogue
+    'soundscape': -30, 'asmr': -25, 'binaural beats': -25,
+    'guided meditation': -15, 'healing frequencies': -20
+}
+
+# A feed's final score must be zero or higher to be included.
+MINIMUM_SCORE_THRESHOLD = 0
+
+
 # --- Timeouts ---
 # Use a tuple for (connect_timeout, read_timeout)
 # Connect: How long to wait for a connection to be established.
@@ -106,7 +143,8 @@ def flush_db_update_batch(status, force_flush=False):
     id_list = []
     batch_size_to_check = DB_UPDATE_BATCH_SIZE
     
-    if status == 'complete':
+    # Check if the status indicates a 'complete' state (e.g., 'complete', 'complete_empty')
+    if status.startswith('complete'):
         if not COMPLETED_IDS_BATCH: return
         # Only flush if the batch is full or if we're forcing it on shutdown
         if len(COMPLETED_IDS_BATCH) >= batch_size_to_check or force_flush:
@@ -119,13 +157,6 @@ def flush_db_update_batch(status, force_flush=False):
         if len(FAILED_IDS_BATCH) >= batch_size_to_check or force_flush:
             id_list = list(FAILED_IDS_BATCH)
             FAILED_IDS_BATCH.clear()
-        else:
-            return
-    elif status == 'complete_empty':
-        if not COMPLETED_IDS_BATCH: return
-        if len(COMPLETED_IDS_BATCH) >= batch_size_to_check or force_flush:
-            id_list = list(COMPLETED_IDS_BATCH)
-            COMPLETED_IDS_BATCH.clear()
         else:
             return
     else:
@@ -145,12 +176,10 @@ def flush_db_update_batch(status, force_flush=False):
         conn.rollback() # Rollback the failed transaction
         conn.close() # Force reconnect
         # On failure, add the IDs back to the global list to be retried.
-        if status == 'complete':
+        if status.startswith('complete'):
             COMPLETED_IDS_BATCH.extend(id_list)
         elif status == 'failed':
             FAILED_IDS_BATCH.extend(id_list)
-        elif status == 'complete_empty':
-            COMPLETED_IDS_BATCH.extend(id_list)
 
 def get_postgres_conn():
     """Establishes or returns the global PostgreSQL connection."""
@@ -172,16 +201,13 @@ def get_postgres_conn():
 
 # --- New Status ---
 # 'complete_empty' is for feeds that parse correctly but have no valid audio.
+# 'complete_filtered' is for feeds that are intentionally skipped (e.g., music).
 def mark_feed_as_status(podcast_id, status):
     """Generic function to add a podcast ID to the correct batch for a given status."""
-    if status == 'complete':
+    if status.startswith('complete'):
         COMPLETED_IDS_BATCH.append(podcast_id)
     elif status == 'failed':
         FAILED_IDS_BATCH.append(podcast_id)
-    elif status == 'complete_empty':
-        # For now, we'll treat empty feeds as a success state.
-        # We can create a separate list/logic later if needed.
-        COMPLETED_IDS_BATCH.append(podcast_id)
     else:
         logging.warning(f"Unknown status '{status}' for podcast_id {podcast_id}")
         return
@@ -239,9 +265,8 @@ def send_batch_to_cf_queue(messages_to_send, delay_seconds=0):
         return 0
 
     try:
-        logging.info(f"Sending a batch of {len(messages_to_send)} jobs to Cloudflare Queue with a delay of {delay_seconds}s.")
-        
-        # Use the SDK's bulk_push method, applying the delay to the entire batch.
+        # This function is now quiet on success to reduce log noise.
+        # It will only log errors.
         response = cf_client.queues.messages.bulk_push(
             queue_id=CF_QUEUE_ID,
             account_id=CF_ACCOUNT_ID,
@@ -252,8 +277,6 @@ def send_batch_to_cf_queue(messages_to_send, delay_seconds=0):
         # The 'messages' attribute in the response contains the IDs of successfully pushed messages
         success_count = len(response.messages) if response.messages else 0
         
-        logging.info(f"Successfully sent {success_count} jobs to Cloudflare Queue.")
-
         # Check for any errors reported by the API for individual messages
         if response.errors:
             logging.error(f"Failed to send {len(response.errors)} individual messages to Cloudflare Queue.")
@@ -277,6 +300,113 @@ def send_batch_to_cf_queue(messages_to_send, delay_seconds=0):
         return 0
 
 
+class PermanentFeedError(Exception):
+    """Custom exception for feed errors that should not be retried."""
+    pass
+
+def fetch_and_parse_feed(rss_url):
+    """Fetches and parses an RSS feed, handling network errors."""
+    try:
+        # This function is now quiet on success to reduce log noise.
+        response = requests.get(
+            rss_url,
+            timeout=REQUEST_TIMEOUT,
+            headers={'User-Agent': 'PodcastIndex-Downloader/1.0'},
+            verify=False  # Ignore SSL certificate errors
+        )
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        
+        feed = feedparser.parse(response.content)
+        return feed
+        
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Failed to fetch feed {rss_url}: {e}")
+        
+        is_permanent_failure = False
+        if e.response and e.response.status_code != 403 and 400 <= e.response.status_code < 500:
+            is_permanent_failure = True
+        elif isinstance(e, requests.exceptions.ConnectionError):
+            is_permanent_failure = True
+
+        if is_permanent_failure:
+            # Raise a specific error for permanent failures so the job can be marked as failed.
+            raise PermanentFeedError(f"Permanent failure fetching feed: {rss_url} - {e}")
+        else:
+            # For temporary errors (like 5xx or timeouts), return None.
+            # The main loop will exit, letting SQS retry the message later.
+            return None
+
+def calculate_dialogue_score(feed):
+    """Calculates a heuristic score to guess if a feed is dialogue-based."""
+    feed_info = feed.get('feed', {})
+    
+    # Normalize text fields for case-insensitive matching.
+    feed_title = feed_info.get('title', '').lower()
+    feed_summary = feed_info.get('summary', '').lower()
+    feed_categories = [tag.get('term', '').lower() for tag in feed_info.get('tags', [])]
+    
+    score = 0
+    
+    # 1. Score based on categories.
+    for cat, cat_score in CATEGORY_SCORES.items():
+        if cat in feed_categories:
+            score += cat_score
+            
+    # 2. Score based on positive keywords in summary/title.
+    for keyword, keyword_score in POSITIVE_KEYWORDS.items():
+        if keyword in feed_summary or keyword in feed_title:
+            score += keyword_score
+            
+    # 3. Score based on negative keywords in summary/title.
+    for keyword, keyword_score in NEGATIVE_KEYWORDS.items():
+        if keyword in feed_summary or keyword in feed_title:
+            score += keyword_score
+            
+    return score
+
+def enqueue_episodes_to_cf(podcast_id, rss_url, language, episodes_to_enqueue):
+    """
+    Takes a list of new episodes and enqueues them to the Cloudflare Queue,
+    applying staggering logic if necessary.
+    """
+    episodes_enqueued = 0
+    cf_batch = []
+    batch_size = SQS_BATCH_SIZE
+    delay_per_batch = 0
+    current_delay = 0
+
+    # If a feed has a huge number of new episodes, enqueue them with increasing delays.
+    if len(episodes_to_enqueue) > STAGGER_THRESHOLD:
+        logging.warning(
+            f"Feed {rss_url} has {len(episodes_to_enqueue)} new episodes. "
+            f"Queueing with delays between batches of {STAGGER_BATCH_SIZE} every {STAGGER_DELAY_SECONDS}s."
+        )
+        batch_size = STAGGER_BATCH_SIZE
+        delay_per_batch = STAGGER_DELAY_SECONDS
+
+    for episode_url in episodes_to_enqueue:
+        message_body = {
+            "episode_url": episode_url,
+            "podcast_rss_url": rss_url,
+            "language": language,
+            "podcast_id": podcast_id,
+        }
+        cf_batch.append(message_body)
+        if len(cf_batch) == batch_size:
+            messages_to_send = [{"body": msg, "content_type": "json"} for msg in cf_batch]
+            episodes_enqueued += send_batch_to_cf_queue(messages_to_send, delay_seconds=current_delay)
+            cf_batch.clear()
+            
+            if delay_per_batch > 0:
+                current_delay += delay_per_batch
+    
+    # Send any remaining items in the last batch.
+    if cf_batch:
+        messages_to_send = [{"body": msg, "content_type": "json"} for msg in cf_batch]
+        episodes_enqueued += send_batch_to_cf_queue(messages_to_send, delay_seconds=current_delay)
+
+    return episodes_enqueued
+
 def process_feed_job(message):
     """
     Processes a single feed job from the SQS queue.
@@ -286,154 +416,90 @@ def process_feed_job(message):
         body = json.loads(message['Body'])
         podcast_id = body['podcast_id']
         rss_url = body['rss_url']
-        language = body.get('language', 'unknown') # Safely get language
+        language = body.get('language', 'unknown')
     except (KeyError, json.JSONDecodeError) as e:
         logging.error(f"Invalid message format, deleting from queue: {message['Body']} - {e}")
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
         return
 
-    logging.info(f"Processing feed for podcast_id {podcast_id}: {rss_url}")
-
     # --- Pre-flight checks ---
-    # Check for private IPs before making a network request
     hostname = requests.utils.urlparse(rss_url).hostname
     if hostname and PRIVATE_IP_REGEX.match(hostname):
-        logging.warning(f"Skipping private/internal IP address: {rss_url}")
+        logging.warning(f"[{podcast_id}] Skipping private/internal IP address: {rss_url}")
         mark_feed_as_failed(podcast_id)
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
         return
 
     try:
-        # Use requests with timeout, then pass to feedparser
-        try:
-            logging.info(f"Fetching feed content for {rss_url}...")
-            response = requests.get(
-                rss_url,
-                timeout=REQUEST_TIMEOUT,
-                headers={'User-Agent': 'PodcastIndex-Downloader/1.0'},
-                verify=False  # Ignore SSL certificate errors
-            )
-            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        # 1. Fetch and parse the feed.
+        feed = fetch_and_parse_feed(rss_url)
+        if feed is None:
+            # This indicates a temporary failure; let SQS handle the retry.
+            return
             
-            logging.info(f"Parsing feed content for {rss_url}...")
-            feed = feedparser.parse(response.content)
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Failed to fetch feed {rss_url}: {e}")
-            
-            # Check for permanent failures vs. temporary ones.
-            # Client errors (4xx) and DNS/Connection errors are permanent.
-            is_permanent_failure = False
-            if e.response and e.response.status_code != 403 and 400 <= e.response.status_code < 500:
-                is_permanent_failure = True
-            # NewConnectionError is a strong signal of a dead domain or firewall block.
-            elif isinstance(e, requests.exceptions.ConnectionError):
-                is_permanent_failure = True
+        if feed.bozo:
+            feed.bozo = 0 # Suppress the warning print by feedparser
+            logging.warning(f"[{podcast_id}] Bozo feed (might be malformed): {rss_url} - {feed.bozo_exception}")
 
-            if is_permanent_failure:
-                mark_feed_as_failed(podcast_id)
-                sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-            # Otherwise, it's a server (5xx) or temporary network error, so let it be retried.
+        # 2. Score the feed's content.
+        score = calculate_dialogue_score(feed)
+        if score < MINIMUM_SCORE_THRESHOLD:
+            feed_title = feed.get('feed', {}).get('title', 'N/A')
+            logging.warning(
+                f"[{podcast_id}] Filtered: Score {score} is below threshold. Feed: '{feed_title}', URL: {rss_url}"
+            )
+            mark_feed_as_status(podcast_id, 'complete_filtered')
+            sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
-        if feed.bozo:
-            # Setting feed.bozo to 0 suppresses the warning print by feedparser
-            # We are logging it ourselves anyway.
-            feed.bozo = 0
-            logging.warning(f"Bozo feed (might be malformed): {rss_url} - {feed.bozo_exception}")
-
+        # 3. Extract all audio URLs from the feed.
         all_episode_urls = []
         audio_extensions = {'.mp3', '.m4a', '.ogg', '.wav', '.aac', '.flac', '.opus'}
-
         for entry in feed.entries:
             for enclosure in getattr(entry, 'enclosures', []):
                 href = enclosure.get('href')
-                if not href:
-                    continue
+                if not href: continue
 
-                # Check 1: Standard audio MIME type
                 is_audio_mime = 'audio' in enclosure.get('type', '')
-
-                # Check 2: File extension, if MIME type is missing or generic
-                href_lower = href.lower()
-                has_audio_extension = any(href_lower.endswith(ext) for ext in audio_extensions)
+                has_audio_extension = any(href.lower().endswith(ext) for ext in audio_extensions)
 
                 if is_audio_mime or has_audio_extension:
                     all_episode_urls.append(href)
-                    break  # Assume one audio enclosure per entry
+                    break
 
         if not all_episode_urls:
-            logging.warning(f"No audio enclosures found in feed: {rss_url}")
-            # Use our new status for better data integrity
+            logging.warning(f"[{podcast_id}] Empty: No audio enclosures found. URL: {rss_url}")
             mark_feed_as_status(podcast_id, 'complete_empty')
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
+        # 4. Check for existing episodes in DynamoDB.
         existing_urls = get_existing_episodes(all_episode_urls)
-        logging.info(f"Feed has {len(all_episode_urls)} episodes. Found {len(existing_urls)} existing in DynamoDB.")
-
         new_episodes_to_enqueue = [url for url in all_episode_urls if url not in existing_urls]
 
         if not new_episodes_to_enqueue:
-            logging.info(f"No new episodes to enqueue for {rss_url}.")
-            # The feed was processed successfully, it just had no *new* items. Mark as complete.
             mark_feed_as_complete(podcast_id)
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
-        # --- Staggering Logic ---
-        episodes_enqueued = 0
-        cf_batch = []
-        batch_size = SQS_BATCH_SIZE
-        delay_per_batch = 0
-        current_delay = 0
-
-        # If a feed has a huge number of new episodes, enqueue them with increasing
-        # delays to avoid overwhelming the origin server.
-        if len(new_episodes_to_enqueue) > STAGGER_THRESHOLD:
-            logging.warning(
-                f"Feed {rss_url} has {len(new_episodes_to_enqueue)} new episodes. "
-                f"Queueing with delays between batches of {STAGGER_BATCH_SIZE} every {STAGGER_DELAY_SECONDS}s."
-            )
-            batch_size = STAGGER_BATCH_SIZE
-            delay_per_batch = STAGGER_DELAY_SECONDS
-
-        for episode_url in new_episodes_to_enqueue:
-            # The message is now just the simple JSON object
-            message_body = {
-                "episode_url": episode_url,
-                "podcast_rss_url": rss_url,
-                "language": language,
-                "podcast_id": podcast_id,
-            }
-            cf_batch.append(message_body)
-            if len(cf_batch) == batch_size:
-                # The message objects no longer contain the delay themselves.
-                messages_to_send = [
-                    {"body": msg, "content_type": "json"} for msg in cf_batch
-                ]
-                episodes_enqueued += send_batch_to_cf_queue(messages_to_send, delay_seconds=current_delay)
-                cf_batch.clear()
-                
-                # Increment the delay for the next batch
-                if delay_per_batch > 0:
-                    current_delay += delay_per_batch
+        # 5. Enqueue new episodes to the Cloudflare Queue.
+        episodes_enqueued = enqueue_episodes_to_cf(
+            podcast_id, rss_url, language, new_episodes_to_enqueue
+        )
         
-        # Send any remaining items in the last batch with the final calculated delay
-        if cf_batch:
-            messages_to_send = [
-                {"body": msg, "content_type": "json"} for msg in cf_batch
-            ]
-            episodes_enqueued += send_batch_to_cf_queue(messages_to_send, delay_seconds=current_delay)
-
-        logging.info(f"Successfully enqueued {episodes_enqueued} new episodes for {rss_url}.")
-        
-        # After successfully enqueueing all episodes, mark the feed as complete.
+        # 6. Mark the feed as complete.
+        logging.info(f"[{podcast_id}] Success: Enqueued {episodes_enqueued} new episodes. URL: {rss_url}")
         mark_feed_as_complete(podcast_id)
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
 
+    except PermanentFeedError as e:
+        # Handle permanent feed fetch errors (e.g., 404 Not Found).
+        logging.error(e)
+        mark_feed_as_failed(podcast_id)
+        sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
     except Exception as e:
         logging.error(f"Failed to process feed {rss_url}: {e}", exc_info=True)
-        # For unexpected errors, mark as failed so we don't retry indefinitely
+        # For other unexpected errors, mark as failed so we don't retry indefinitely.
         mark_feed_as_failed(podcast_id)
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
 
@@ -461,14 +527,15 @@ def main():
                 )
                 if "Messages" in response:
                     for message in response["Messages"]:
-                        time.sleep(1)
                         process_feed_job(message)
+                        time.sleep(1)
                 else:
                     logging.info("Queue is empty, waiting for new messages...")
                     # Flush any lingering items if the queue is empty
                     flush_db_update_batch('complete', force_flush=True)
                     flush_db_update_batch('failed', force_flush=True)
                     flush_db_update_batch('complete_empty', force_flush=True)
+                    flush_db_update_batch('complete_filtered', force_flush=True) # Added for new status
 
             except Exception as e:
                 logging.error(f"An error occurred in the main SQS loop: {e}")
@@ -478,6 +545,7 @@ def main():
         flush_db_update_batch('complete', force_flush=True)
         flush_db_update_batch('failed', force_flush=True)
         flush_db_update_batch('complete_empty', force_flush=True)
+        flush_db_update_batch('complete_filtered', force_flush=True) # Added for new status
         if pg_conn:
             pg_conn.close()
             logging.info("PostgreSQL connection closed.")
