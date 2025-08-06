@@ -229,8 +229,8 @@ def get_existing_episodes(episode_urls):
     return existing_urls
 
 
-def send_batch_to_cf_queue(messages_to_send):
-    """Sends a pre-formatted batch of messages to the Cloudflare download queue."""
+def send_batch_to_cf_queue(messages_to_send, delay_seconds=0):
+    """Sends a pre-formatted batch of messages to the Cloudflare download queue with an optional delay."""
     if not messages_to_send:
         return 0
 
@@ -239,23 +239,15 @@ def send_batch_to_cf_queue(messages_to_send):
         return 0
 
     try:
-        # Find the max delay in the batch for logging purposes.
-        max_delay = max(msg.get("delay_seconds", 0) for msg in messages_to_send)
-        logging.info(f"Sending a batch of {len(messages_to_send)} jobs to Cloudflare Queue with a max delay of {max_delay}s.")
+        logging.info(f"Sending a batch of {len(messages_to_send)} jobs to Cloudflare Queue with a delay of {delay_seconds}s.")
         
-        # Use the SDK's bulk_push method
+        # Use the SDK's bulk_push method, applying the delay to the entire batch.
         response = cf_client.queues.messages.bulk_push(
             queue_id=CF_QUEUE_ID,
             account_id=CF_ACCOUNT_ID,
             messages=messages_to_send,
+            delay_seconds=delay_seconds, # Apply delay at the batch level
         )
-
-        # DEBUGGING: Log the full response object to understand why success_count is 0.
-        try:
-            logging.info(f"Full API Response: {response.to_json()}")
-        except AttributeError:
-            # Fallback for objects without to_json()
-            logging.info(f"Full API Response (raw): {response}")
 
         # The 'messages' attribute in the response contains the IDs of successfully pushed messages
         success_count = len(response.messages) if response.messages else 0
@@ -415,12 +407,11 @@ def process_feed_job(message):
             }
             cf_batch.append(message_body)
             if len(cf_batch) == batch_size:
-                # Add the calculated delay to each message in this batch
+                # The message objects no longer contain the delay themselves.
                 messages_to_send = [
-                    {"body": msg, "content_type": "json", "delay_seconds": current_delay}
-                    for msg in cf_batch
+                    {"body": msg, "content_type": "json"} for msg in cf_batch
                 ]
-                episodes_enqueued += send_batch_to_cf_queue(messages_to_send)
+                episodes_enqueued += send_batch_to_cf_queue(messages_to_send, delay_seconds=current_delay)
                 cf_batch.clear()
                 
                 # Increment the delay for the next batch
@@ -430,10 +421,9 @@ def process_feed_job(message):
         # Send any remaining items in the last batch with the final calculated delay
         if cf_batch:
             messages_to_send = [
-                {"body": msg, "content_type": "json", "delay_seconds": current_delay}
-                for msg in cf_batch
+                {"body": msg, "content_type": "json"} for msg in cf_batch
             ]
-            episodes_enqueued += send_batch_to_cf_queue(messages_to_send)
+            episodes_enqueued += send_batch_to_cf_queue(messages_to_send, delay_seconds=current_delay)
 
         logging.info(f"Successfully enqueued {episodes_enqueued} new episodes for {rss_url}.")
         
