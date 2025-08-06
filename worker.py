@@ -67,7 +67,7 @@ CATEGORY_SCORES = {
     'comedy interview': 15, 'crime': 10, 'arts': 5,
     
     # Negative signals (likely non-dialogue)
-    'spirituality': -10, 'religion & spirituality': -5,
+    'spirituality': -10,
     'music': -30
 }
 
@@ -82,7 +82,7 @@ NEGATIVE_KEYWORDS = {
     'dj set': -25, 'dj mix': -25, 'tracklist': -20, 'remix': -15,
     'live set': -15, 'mixtape': -15, 'white noise': -15,
     # Music genres
-    'techno': -20, 'house music': -20, 'trance': -20, 'edm': -20,
+    'techno': -10, 'house music': -20, 'trance': -20, 'edm': -20,
     'ambient': -15, 'instrumental': -15,
     # Other non-dialogue
     'soundscape': -30, 'asmr': -25, 'binaural beats': -25,
@@ -115,7 +115,6 @@ sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 dynamodb_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-# --- Cloudflare Client (NEW) ---
 # Initialize the client if all configuration variables are present.
 cf_client = None
 if all([CF_ACCOUNT_ID, CF_QUEUE_ID, CF_API_TOKEN]):

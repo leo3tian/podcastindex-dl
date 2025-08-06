@@ -1,0 +1,163 @@
+--- Fetching and parsing feed: https://urbanbirdingandtheburdenofbourbon.podomatic.com/rss2.xml ---
+
+
+==================================================
+ Content Filtering Score
+==================================================
+Final Score: -20
+Result: FILTERED (Score is < 0)
+==================================================
+
+==================================================
+ Overall Feed Information
+==================================================
+title: Urban Birding and the Burden of Bourbon
+title_detail:
+  type: text/plain
+  language: None
+  base: 
+  value: Urban Birding and the Burden of Bourbon
+links:
+  [0]:
+    rel: alternate
+    type: text/html
+    href: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon
+  [1]:
+    href: https://urbanbirdingandtheburdenofbourbon.podomatic.com/rss2.xml
+    rel: self
+    title: Urban Birding and the Burden of Bourbon
+    type: application/rss+xml
+link: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon
+subtitle: Birds, booze, music, marriage.
+subtitle_detail:
+  type: text/plain
+  language: None
+  base: 
+  value: Birds, booze, music, marriage.
+language: en-us
+generator_detail:
+  name: Podomatic RSS Generator
+generator: Podomatic RSS Generator
+published: Sat, 11 Jan 2025 02:49:00 +0000
+published_parsed: time.struct_time(tm_year=2025, tm_mon=1, tm_mday=11, tm_hour=2, tm_min=49, tm_sec=0, tm_wday=5, tm_yday=11, tm_isdst=0)
+tags:
+  [0]:
+    term: birding
+    scheme: http://www.itunes.com/
+    label: None
+  [1]:
+    term: bourbon
+    scheme: http://www.itunes.com/
+    label: None
+  [2]:
+    term: music
+    scheme: http://www.itunes.com/
+    label: None
+  [3]:
+    term: alcohol
+    scheme: http://www.itunes.com/
+    label: None
+  [4]:
+    term: ornithology
+    scheme: http://www.itunes.com/
+    label: None
+  [5]:
+    term: marriage
+    scheme: http://www.itunes.com/
+    label: None
+  [6]:
+    term: Education
+    scheme: http://www.itunes.com/
+    label: None
+rights: Copyright 2025 Ben Grigg and Suzy Erin
+rights_detail:
+  type: text/plain
+  language: None
+  base: 
+  value: Copyright 2025 Ben Grigg and Suzy Erin
+itunes_type: episodic
+itunes_explicit: None
+itunes_block: 0
+image:
+  href: https://assets.podomatic.net/ts/9c/eb/92/benjamin78317988/1400x1400_10681020.jpg
+  title: Urban Birding and the Burden of Bourbon
+  title_detail:
+    type: text/plain
+    language: None
+    base: 
+    value: Urban Birding and the Burden of Bourbon
+  links:
+    [0]:
+      rel: alternate
+      type: text/html
+      href: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon
+  link: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon
+authors:
+  [0]:
+    name: Ben Grigg and Suzy Erin
+author: Ben Grigg and Suzy Erin
+author_detail:
+  name: Ben Grigg and Suzy Erin
+summary: A couple of Chicago-based nerds who are married to each other discuss birding in cities, alcohol, music, and whatever else comes to mind.
+summary_detail:
+  type: text/plain
+  language: None
+  base: 
+  value: A couple of Chicago-based nerds who are married to each other discuss birding in cities, alcohol, music, and whatever else comes to mind.
+
+==================================================
+ First Episode Information
+==================================================
+title: Episode 12 - Dual Dinocast Extravaganzosaurus! (Part Two)
+title_detail:
+  type: text/plain
+  language: None
+  base: 
+  value: Episode 12 - Dual Dinocast Extravaganzosaurus! (Part Two)
+summary: You've waited so long, but wait no longer! Here is the unpardonably late Part 2 of our joint podcast with After We Take Out the Garbage. Grab yourself an MGD and some mint-chocolate chip get ready for a pleasant friendcast! Heyah!
+summary_detail:
+  type: text/html
+  language: None
+  base: 
+  value: You've waited so long, but wait no longer! Here is the unpardonably late Part 2 of our joint podcast with After We Take Out the Garbage. Grab yourself an MGD and some mint-chocolate chip get ready for a pleasant friendcast! Heyah!
+id: https://urbanbirdingandtheburdenofbourbon.podomatic.com/entry/2015-11-22T08_50_27-08_00
+guidislink: True
+link: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon/episodes/2015-11-22T08_50_27-08_00
+comments: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon/episodes/2015-11-22T08_50_27-08_00
+published: Sun, 22 Nov 2015 16:50:27 +0000
+published_parsed: time.struct_time(tm_year=2015, tm_mon=11, tm_mday=22, tm_hour=16, tm_min=50, tm_sec=27, tm_wday=6, tm_yday=326, tm_isdst=0)
+updated: 2016-02-21
+updated_parsed: time.struct_time(tm_year=2016, tm_mon=2, tm_mday=21, tm_hour=0, tm_min=0, tm_sec=0, tm_wday=6, tm_yday=52, tm_isdst=0)
+created: 2016-02-21
+created_parsed: time.struct_time(tm_year=2016, tm_mon=2, tm_mday=21, tm_hour=0, tm_min=0, tm_sec=0, tm_wday=6, tm_yday=52, tm_isdst=0)
+links:
+  [0]:
+    rel: alternate
+    type: text/html
+    href: https://www.podomatic.com/podcasts/urbanbirdingandtheburdenofbourbon/episodes/2015-11-22T08_50_27-08_00
+  [1]:
+    length: 56614496
+    type: audio/mpeg
+    href: https://urbanbirdingandtheburdenofbourbon.podomatic.com/enclosure/2015-11-22T08_50_27-08_00.mp3?_=1456098246.11243891
+    rel: enclosure
+authors:
+  [0]:
+    name: Ben Grigg and Suzy Erin
+author: Ben Grigg and Suzy Erin
+author_detail:
+  name: Ben Grigg and Suzy Erin
+itunes_duration: 2358
+image:
+  href: https://assets.podomatic.net/ts/9c/eb/92/benjamin78317988/1400x1400_11042628.jpg
+content:
+  [0]:
+    type: text/plain
+    language: None
+    base: 
+    value: You've waited so long, but wait no longer! Here is the unpardonably late Part 2 of our joint podcast with After We Take Out the Garbage. Grab yourself an MGD and some mint-chocolate chip get ready for a pleasant friendcast! Heyah!
+subtitle: You've waited so long, but wait no longer! Here is the unpardonably late Part 2 of our joint podc...
+subtitle_detail:
+  type: text/plain
+  language: None
+  base: 
+  value: You've waited so long, but wait no longer! Here is the unpardonably late Part 2 of our joint podc...
