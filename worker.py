@@ -106,6 +106,10 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
+# Silence the verbose HTTP logging from the Cloudflare SDK and its HTTP client.
+logging.getLogger("cloudflare").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # --- AWS / DB Clients ---
 sqs_client = boto3.client("sqs", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
