@@ -13,7 +13,7 @@ import time
 FEEDER_BATCH_SIZE = int(os.getenv("FEEDER_BATCH_SIZE", 1000))
 FEEDER_SLEEP_SECONDS = int(os.getenv("FEEDER_SLEEP_SECONDS", 10))
 # How old an 'in_progress' job can be before we consider it stale.
-STALE_JOB_TIMEOUT_MINUTES = int(os.getenv("STALE_JOB_TIMEOUT_MINUTES", 60))
+STALE_JOB_TIMEOUT_MINUTES = int(os.getenv("STALE_JOB_TIMEOUT_MINUTES", 10))
 
 # --- AWS / DB Config ---
 FEEDS_SQS_QUEUE_URL = os.getenv("FEEDS_SQS_QUEUE_URL", "https://sqs.us-west-1.amazonaws.com/450282239172/FeedsToProcessQueue")
@@ -127,7 +127,7 @@ def main():
                 pg_cursor.execute("""
                     SELECT id, url, language
                     FROM podcasts
-                    WHERE processing_status = 'pending'
+                    WHERE processing_status = 'pending' AND episodeCount > 25
                     ORDER BY id
                     FOR UPDATE SKIP LOCKED
                     LIMIT %s;
