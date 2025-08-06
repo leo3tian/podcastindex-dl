@@ -17,7 +17,7 @@ CATEGORY_SCORES = {
     'music commentary': 5, 'music interviews': 10,
     
     # Negative signals (likely non-dialogue)
-    'leisure': -5, 'spirituality': -10, 'religion & spirituality': -5,
+    'spirituality': -10, 'religion & spirituality': -5,
     'music': -30
 }
 
@@ -121,20 +121,20 @@ def main():
             print(f"Result: FILTERED (Score is < {MINIMUM_SCORE_THRESHOLD})")
         print("="*50)
 
-        # # --- Print Top-Level Feed Metadata ---
-        # print("\n" + "="*50)
-        # print(" Overall Feed Information")
-        # print("="*50)
-        # print_dict_nicely(feed_info)
+        # --- Print Top-Level Feed Metadata ---
+        print("\n" + "="*50)
+        print(" Overall Feed Information")
+        print("="*50)
+        print_dict_nicely(feed_info)
         
-        # # --- Print Metadata for the First Episode ---
-        # if feed.entries:
-        #     print("\n" + "="*50)
-        #     print(" First Episode Information")
-        #     print("="*50)
-        #     print_dict_nicely(feed.entries[0])
-        # else:
-        #     print("\nNo episodes found in this feed.")
+        # --- Print Metadata for the First Episode ---
+        if feed.entries:
+            print("\n" + "="*50)
+            print(" First Episode Information")
+            print("="*50)
+            print_dict_nicely(feed.entries[0])
+        else:
+            print("\nNo episodes found in this feed.")
 
     except requests.exceptions.RequestException as e:
         print(f"Error fetching the RSS feed: {e}")

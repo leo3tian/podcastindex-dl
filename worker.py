@@ -67,7 +67,7 @@ CATEGORY_SCORES = {
     'comedy interview': 15, 'crime': 10, 'arts': 5,
     
     # Negative signals (likely non-dialogue)
-    'leisure': -5, 'spirituality': -10, 'religion & spirituality': -5,
+    'spirituality': -10, 'religion & spirituality': -5,
     'music': -30
 }
 
