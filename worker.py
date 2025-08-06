@@ -229,23 +229,19 @@ def get_existing_episodes(episode_urls):
     return existing_urls
 
 
-def send_batch_to_cf_queue(cf_batch):
-    """Sends a batch of messages to the Cloudflare download queue using the Python SDK."""
-    if not cf_batch:
+def send_batch_to_cf_queue(messages_to_send):
+    """Sends a pre-formatted batch of messages to the Cloudflare download queue."""
+    if not messages_to_send:
         return 0
 
     if not cf_client:
         logging.error("Cloudflare client not initialized. Cannot send messages.")
         return 0
 
-    # The SDK will automatically JSON-serialize the dictionary in 'body'
-    # when the content_type is 'json'. Do NOT pre-serialize with json.dumps().
-    messages_to_send = [
-        {"body": msg, "content_type": "json"} for msg in cf_batch
-    ]
-
     try:
-        logging.info(f"Sending a batch of {len(messages_to_send)} jobs to Cloudflare Queue.")
+        # Find the max delay in the batch for logging purposes.
+        max_delay = max(msg.get("delay_seconds", 0) for msg in messages_to_send)
+        logging.info(f"Sending a batch of {len(messages_to_send)} jobs to Cloudflare Queue with a max delay of {max_delay}s.")
         
         # Use the SDK's bulk_push method
         response = cf_client.queues.messages.bulk_push(
@@ -328,7 +324,7 @@ def process_feed_job(message):
             # Check for permanent failures vs. temporary ones.
             # Client errors (4xx) and DNS/Connection errors are permanent.
             is_permanent_failure = False
-            if e.response and 400 <= e.response.status_code < 500:
+            if e.response and e.response.status_code != 403 and 400 <= e.response.status_code < 500:
                 is_permanent_failure = True
             # NewConnectionError is a strong signal of a dead domain or firewall block.
             elif isinstance(e, requests.exceptions.ConnectionError):
@@ -380,29 +376,62 @@ def process_feed_job(message):
 
         if not new_episodes_to_enqueue:
             logging.info(f"No new episodes to enqueue for {rss_url}.")
+            # The feed was processed successfully, it just had no *new* items. Mark as complete.
+            mark_feed_as_complete(podcast_id)
             sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
             return
 
-        # Use a simple list for the batch now, not SQS format
-        cf_batch = []
+        # --- Staggering Logic ---
         episodes_enqueued = 0
+        cf_batch = []
+        batch_size = SQS_BATCH_SIZE
+        delay_per_batch = 0
+        current_delay = 0
+
+        # If a feed has a huge number of new episodes, enqueue them with increasing
+        # delays to avoid overwhelming the origin server.
+        if len(new_episodes_to_enqueue) > STAGGER_THRESHOLD:
+            logging.warning(
+                f"Feed {rss_url} has {len(new_episodes_to_enqueue)} new episodes. "
+                f"Queueing with delays between batches of {STAGGER_BATCH_SIZE} every {STAGGER_DELAY_SECONDS}s."
+            )
+            batch_size = STAGGER_BATCH_SIZE
+            delay_per_batch = STAGGER_DELAY_SECONDS
+
         for episode_url in new_episodes_to_enqueue:
             # The message is now just the simple JSON object
             message_body = {
                 "episode_url": episode_url,
                 "podcast_rss_url": rss_url,
                 "language": language,
-                "podcast_id": podcast_id
+                "podcast_id": podcast_id,
             }
             cf_batch.append(message_body)
-            if len(cf_batch) == SQS_BATCH_SIZE:
-                episodes_enqueued += send_batch_to_cf_queue(cf_batch)
+            if len(cf_batch) == batch_size:
+                # Add the calculated delay to each message in this batch
+                messages_to_send = [
+                    {"body": msg, "content_type": "json", "delay_seconds": current_delay}
+                    for msg in cf_batch
+                ]
+                episodes_enqueued += send_batch_to_cf_queue(messages_to_send)
                 cf_batch.clear()
-
+                
+                # Increment the delay for the next batch
+                if delay_per_batch > 0:
+                    current_delay += delay_per_batch
+        
+        # Send any remaining items in the last batch with the final calculated delay
         if cf_batch:
-            episodes_enqueued += send_batch_to_cf_queue(cf_batch)
+            messages_to_send = [
+                {"body": msg, "content_type": "json", "delay_seconds": current_delay}
+                for msg in cf_batch
+            ]
+            episodes_enqueued += send_batch_to_cf_queue(messages_to_send)
 
         logging.info(f"Successfully enqueued {episodes_enqueued} new episodes for {rss_url}.")
+        
+        # After successfully enqueueing all episodes, mark the feed as complete.
+        mark_feed_as_complete(podcast_id)
         sqs_client.delete_message(QueueUrl=FEEDS_SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
 
     except Exception as e:
