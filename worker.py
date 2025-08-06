@@ -250,6 +250,13 @@ def send_batch_to_cf_queue(messages_to_send):
             messages=messages_to_send,
         )
 
+        # DEBUGGING: Log the full response object to understand why success_count is 0.
+        try:
+            logging.info(f"Full API Response: {response.to_json()}")
+        except AttributeError:
+            # Fallback for objects without to_json()
+            logging.info(f"Full API Response (raw): {response}")
+
         # The 'messages' attribute in the response contains the IDs of successfully pushed messages
         success_count = len(response.messages) if response.messages else 0
         
