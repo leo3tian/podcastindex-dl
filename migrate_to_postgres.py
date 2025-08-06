@@ -6,7 +6,7 @@ import logging
 
 # --- Configuration ---
 # Source SQLite database
-SQLITE_DB_PATH = os.getenv("DB_PATH", "podcastindex.db")
+SQLITE_DB_PATH = os.getenv("DB_PATH", "podcastindex_feeds.db")
 
 # Destination PostgreSQL database (from environment variables)
 PG_HOST = os.getenv("PG_HOST")
