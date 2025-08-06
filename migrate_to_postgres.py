@@ -62,6 +62,7 @@ def main():
         id BIGINT PRIMARY KEY,
         url TEXT UNIQUE NOT NULL,
         language TEXT,
+        episode_count INTEGER,
         processing_status TEXT DEFAULT 'pending' NOT NULL,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
@@ -71,8 +72,8 @@ def main():
     logging.info("Lean table 'podcasts' created successfully.")
 
     # --- Fetch data from SQLite and insert into PostgreSQL ---
-    # We only select the columns we need now.
-    sqlite_cursor.execute("SELECT id, url, language FROM podcasts")
+    # We now select episodeCount and will map it to episode_count.
+    sqlite_cursor.execute("SELECT id, url, language, episodeCount FROM podcasts")
     total_rows_migrated = 0
 
     while True:
@@ -81,9 +82,9 @@ def main():
             break
 
         # The executemany function is smart enough to map the columns.
-        # We are inserting into 'id', 'url', and 'language'. 'processing_status'
-        # will use its default value of 'pending'.
-        insert_query = "INSERT INTO podcasts (id, url, language) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING"
+        # We are inserting into 'id', 'url', 'language', and 'episode_count'.
+        # 'processing_status' will use its default value.
+        insert_query = "INSERT INTO podcasts (id, url, language, episode_count) VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
         
         pg_cursor.executemany(insert_query, batch)
         pg_conn.commit()

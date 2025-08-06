@@ -127,7 +127,7 @@ def main():
                 pg_cursor.execute("""
                     SELECT id, url, language
                     FROM podcasts
-                    WHERE processing_status = 'pending' AND episodeCount > 25
+                    WHERE processing_status = 'pending'
                     ORDER BY id
                     FOR UPDATE SKIP LOCKED
                     LIMIT %s;
