@@ -67,12 +67,12 @@ CATEGORY_SCORES = {
     'comedy interview': 15, 'crime': 10, 'arts': 5,
     
     # Negative signals (likely non-dialogue)
-    'spirituality': -10,
+    'spirituality': -10, 'religion & spirituality': -5,
     'music': -30
 }
 
 POSITIVE_KEYWORDS = {
-    'interview': 15, 'discussion': 15, 'conversation': 10, 'commentary': 10,
+    'interview': 15, 'discussion': 15, 'discuss': 15,'conversation': 10, 'commentary': 10,
     'panel': 10, 'explains': 10, 'breaks down': 10, 'analyzes': 10,
     'hosted by': 5, 'episode': 2
 }
@@ -83,10 +83,15 @@ NEGATIVE_KEYWORDS = {
     'live set': -15, 'mixtape': -15, 'white noise': -15,
     # Music genres
     'techno': -10, 'house music': -20, 'trance': -20, 'edm': -20,
-    'ambient': -15, 'instrumental': -15,
+    'ambient': -15, 'instrumental': -15, 'lofi': -12, 'chillhop': -12,
+    'beats': -10, 'focus music': -10,
     # Other non-dialogue
     'soundscape': -30, 'asmr': -25, 'binaural beats': -25,
-    'guided meditation': -15, 'healing frequencies': -20
+    'guided meditation': -15, 'healing frequencies': -20, 'sound bath': -20,
+    'sleep story': -15, 'bedtime story': -15, 'sleep sounds': -20,
+    'rain sounds': -20, 'ocean sounds': -20, 'karaoke': -20,
+    # Religion & Spirituality
+    'prayer': -10
 }
 
 # A feed's final score must be zero or higher to be included.
